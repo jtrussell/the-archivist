@@ -31,21 +31,18 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
     if (!videoRef.current || isScanning) return
 
     try {
-      // Create reader if not exists
       if (!readerRef.current) {
         readerRef.current = new BrowserMultiFormatReader()
       }
 
       const reader = readerRef.current
 
-      // Get available video devices
       const videoInputDevices = await BrowserMultiFormatReader.listVideoInputDevices()
 
       if (videoInputDevices.length === 0) {
         throw new Error('No camera found on this device')
       }
 
-      // Prefer back camera on mobile
       const backCamera = videoInputDevices.find((device: MediaDeviceInfo) =>
         device.label.toLowerCase().includes('back')
       )
@@ -54,7 +51,6 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
       setIsScanning(true)
       setHasPermission(true)
 
-      // Start decoding from video
       reader.decodeFromVideoDevice(
         selectedDeviceId,
         videoRef.current,
@@ -62,9 +58,9 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
           if (result) {
             const text = result.getText()
             onScan(text)
+            stopScanning()
           }
 
-          // Ignore errors when no QR code is in frame
           if (error && error.name !== 'NotFoundException') {
             console.error('Scan error:', error)
           }
@@ -83,7 +79,6 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
 
   const stopScanning = () => {
     if (videoRef.current) {
-      // Stop all video tracks
       const stream = videoRef.current.srcObject as MediaStream | null
       if (stream) {
         stream.getTracks().forEach(track => track.stop())
@@ -127,11 +122,9 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
         </div>
       )}
 
-      {/* QR code targeting overlay */}
       {isScanning && (
         <div className="absolute inset-0 pointer-events-none">
           <div className="absolute inset-[15%] border-2 border-white rounded-lg shadow-lg">
-            {/* Corner decorations */}
             <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-primary -translate-x-1 -translate-y-1" />
             <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-primary translate-x-1 -translate-y-1" />
             <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-primary -translate-x-1 translate-y-1" />

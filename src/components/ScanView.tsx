@@ -4,7 +4,7 @@ import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Card, CardContent } from './ui/card'
 import { recordScan } from '../services/syncService'
-import { getAppState, saveAppState, isWebhookConfigured } from '../services/storage'
+import { getAppState, saveAppState } from '../services/storage'
 
 interface ScanViewProps {
   isConfigured: boolean
@@ -18,27 +18,23 @@ export function ScanView({ isConfigured }: ScanViewProps) {
   const [message, setMessage] = useState('')
 
   useEffect(() => {
-    // Load current tag from storage
     const state = getAppState()
     setCurrentTag(state.currentTag)
   }, [])
 
   useEffect(() => {
-    // Save tag whenever it changes
     if (currentTag !== getAppState().currentTag) {
       saveAppState({ currentTag })
     }
   }, [currentTag])
 
   const handleScan = async (qrData: string) => {
-    // Prevent duplicate scans (debounce)
     if (lastScan && lastScan.data === qrData && Date.now() - lastScan.timestamp.getTime() < 2000) {
       return
     }
 
     setLastScan({ data: qrData, timestamp: new Date() })
 
-    // Temporarily stop scanning for visual feedback
     setScanning(false)
 
     try {
@@ -47,66 +43,19 @@ export function ScanView({ isConfigured }: ScanViewProps) {
       if (result.success) {
         setStatus('queued')
         setMessage('Scan queued!')
-
-        // Play success sound if available
-        playSound('success')
-
-        // Reset after delay and resume scanning
-        setTimeout(() => {
-          setStatus('idle')
-          setMessage('')
-          setScanning(true)
-        }, 1500)
       } else {
         setStatus('error')
         setMessage(result.error || 'Failed to record scan')
-
-        // Resume scanning after error message
-        setTimeout(() => {
-          setStatus('idle')
-          setMessage('')
-          setScanning(true)
-        }, 3000)
       }
     } catch (error) {
       setStatus('error')
       setMessage(error instanceof Error ? error.message : 'Unknown error')
-
-      setTimeout(() => {
-        setStatus('idle')
-        setMessage('')
-        setScanning(true)
-      }, 3000)
     }
   }
 
   const handleError = (error: Error) => {
     setStatus('error')
     setMessage(error.message)
-  }
-
-  const playSound = (type: 'success' | 'error') => {
-    // Simple beep using Web Audio API
-    try {
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
-      const oscillator = audioContext.createOscillator()
-      const gainNode = audioContext.createGain()
-
-      oscillator.connect(gainNode)
-      gainNode.connect(audioContext.destination)
-
-      oscillator.frequency.value = type === 'success' ? 800 : 400
-      oscillator.type = 'sine'
-
-      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime)
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2)
-
-      oscillator.start(audioContext.currentTime)
-      oscillator.stop(audioContext.currentTime + 0.2)
-    } catch (error) {
-      // Audio API not available or failed
-      console.warn('Could not play sound:', error)
-    }
   }
 
   if (!isConfigured) {
@@ -128,7 +77,6 @@ export function ScanView({ isConfigured }: ScanViewProps) {
 
   return (
     <div className="space-y-6 max-w-2xl mx-auto">
-      {/* Current Tag */}
       <Card>
         <CardContent className="pt-6">
           <label className="block text-sm font-medium mb-2">
@@ -147,7 +95,6 @@ export function ScanView({ isConfigured }: ScanViewProps) {
         </CardContent>
       </Card>
 
-      {/* Scanner */}
       <div className="space-y-4">
         {!scanning ? (
           <Button
@@ -176,7 +123,6 @@ export function ScanView({ isConfigured }: ScanViewProps) {
           </div>
         )}
 
-        {/* Status Messages */}
         {status !== 'idle' && (
           <Card className={
             status === 'success' ? 'border-green-500' :

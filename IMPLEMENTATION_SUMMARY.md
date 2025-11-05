@@ -77,8 +77,6 @@ the-archivist/
 │   │   ├── ScanView.tsx    # Scanning interface
 │   │   └── SettingsView.tsx # Configuration
 │   ├── services/
-│   │   ├── googleAuth.ts   # OAuth PKCE flow
-│   │   ├── googleSheets.ts # Sheets API
 │   │   ├── storage.ts      # localStorage
 │   │   ├── syncService.ts  # Offline queue
 │   │   ├── deckTransform.ts # Data transformation
