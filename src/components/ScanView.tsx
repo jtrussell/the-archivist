@@ -1,32 +1,21 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { QRScanner } from './QRScanner'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Card, CardContent } from './ui/card'
 import { recordScan } from '../services/syncService'
-import { getAppState, saveAppState } from '../services/storage'
+import { useAppState } from '../hooks/useAppState'
 
 interface ScanViewProps {
   isConfigured: boolean
 }
 
 export function ScanView({ isConfigured }: ScanViewProps) {
-  const [currentTag, setCurrentTag] = useState('')
+  const { state, updateState } = useAppState()
   const [scanning, setScanning] = useState(false)
   const [lastScan, setLastScan] = useState<{ data: string; timestamp: Date } | null>(null)
   const [status, setStatus] = useState<'idle' | 'success' | 'error' | 'queued'>('idle')
   const [message, setMessage] = useState('')
-
-  useEffect(() => {
-    const state = getAppState()
-    setCurrentTag(state.currentTag)
-  }, [])
-
-  useEffect(() => {
-    if (currentTag !== getAppState().currentTag) {
-      saveAppState({ currentTag })
-    }
-  }, [currentTag])
 
   const handleScan = async (qrData: string) => {
     if (lastScan && lastScan.data === qrData && Date.now() - lastScan.timestamp.getTime() < 2000) {
@@ -38,7 +27,7 @@ export function ScanView({ isConfigured }: ScanViewProps) {
     setScanning(false)
 
     try {
-      const result = await recordScan(qrData, currentTag)
+      const result = await recordScan(qrData, state.currentTag)
 
       if (result.success) {
         setStatus('queued')
@@ -84,8 +73,8 @@ export function ScanView({ isConfigured }: ScanViewProps) {
           </label>
           <Input
             type="text"
-            value={currentTag}
-            onChange={(e) => setCurrentTag(e.target.value)}
+            value={state.currentTag}
+            onChange={(e) => updateState({ currentTag: e.target.value })}
             placeholder="e.g., Storage Box #3457"
             className="text-lg"
           />
@@ -101,7 +90,8 @@ export function ScanView({ isConfigured }: ScanViewProps) {
             onClick={() => setScanning(true)}
             size="lg"
             className="w-full"
-            disabled={!currentTag.trim()}
+            variant='outline'
+            disabled={!state.currentTag.trim()}
           >
             Start Scanning
           </Button>
@@ -141,7 +131,7 @@ export function ScanView({ isConfigured }: ScanViewProps) {
           </Card>
         )}
 
-        {!currentTag.trim() && (
+        {!state.currentTag.trim() && (
           <p className="text-sm text-center text-muted-foreground">
             Enter a location tag to start scanning
           </p>

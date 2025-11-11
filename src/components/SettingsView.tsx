@@ -11,6 +11,7 @@ import {
   setWebhookApiKey,
 } from '../services/webhookService'
 import { getUnsyncedCount, syncQueue } from '../services/syncService'
+import { clearScanQueue } from '../services/storage'
 
 interface SettingsViewProps {
   isConfigured: boolean
@@ -94,8 +95,35 @@ export function SettingsView({ isConfigured, onConfigChange }: SettingsViewProps
     }
   }
 
+  const handleClearQueue = () => {
+    if (confirm('Are you sure you want to delete all queued scans? This cannot be undone.')) {
+      clearScanQueue()
+      setUnsyncedCount(0)
+      setError(null)
+    }
+  }
+
   return (
     <div className="space-y-6 max-w-2xl mx-auto">
+      {isConfigured && unsyncedCount > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Pending Scans</CardTitle>
+            <CardDescription>
+              You have {unsyncedCount} scan{unsyncedCount !== 1 ? 's' : ''} waiting to be sent
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Button onClick={handleSync} disabled={loading} variant='outline' className="w-full">
+              {loading ? 'Sending...' : `Send ${unsyncedCount} Scan${unsyncedCount !== 1 ? 's' : ''}`}
+            </Button>
+            <Button onClick={handleClearQueue} variant="outline" className="w-full">
+              Clear Queue
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Webhook Configuration</CardTitle>
@@ -165,22 +193,6 @@ export function SettingsView({ isConfigured, onConfigChange }: SettingsViewProps
           )}
         </CardContent>
       </Card>
-
-      {isConfigured && unsyncedCount > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Pending Scans</CardTitle>
-            <CardDescription>
-              You have {unsyncedCount} scan{unsyncedCount !== 1 ? 's' : ''} waiting to be sent
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button onClick={handleSync} disabled={loading}>
-              {loading ? 'Sending...' : `Send ${unsyncedCount} Scan${unsyncedCount !== 1 ? 's' : ''}`}
-            </Button>
-          </CardContent>
-        </Card>
-      )}
 
       <Card>
         <CardHeader>

@@ -78,6 +78,7 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
   }
 
   const stopScanning = () => {
+    readerRef.current = null
     if (videoRef.current) {
       const stream = videoRef.current.srcObject as MediaStream | null
       if (stream) {

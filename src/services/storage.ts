@@ -143,3 +143,14 @@ export function isWebhookConfigured(): boolean {
   const state = getAppState()
   return !!state.webhookUrl && state.webhookUrl.trim().length > 0
 }
+
+/**
+ * Clear entire scan queue
+ */
+export function clearScanQueue(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEYS.SCAN_QUEUE)
+  } catch (error) {
+    console.error('Error clearing scan queue:', error)
+  }
+}
