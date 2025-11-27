@@ -13,51 +13,52 @@ All core functionality has been implemented and the project builds successfully.
    - Type-safe React components
    - Production-ready configuration
 
-2. **Google OAuth Integration** ✓
-   - PKCE flow for secure client-side auth
-   - Automatic token refresh
-   - Logout functionality
+2. **Webhook Integration (Make.com)** ✓
+   - Configure webhook URL in settings
+   - Optional API key support (sent as `x-make-apikey` header)
+   - Batch submission of scans
+   - No backend required - completely client-side
 
-3. **Google Sheets API Integration** ✓
-   - Create new spreadsheets with formatting
-   - Connect to existing spreadsheets
-   - Write scan data (timestamp, deck data, tag)
-   - Search/lookup by deck data
-
-4. **QR Scanner** ✓
+3. **QR Scanner** ✓
    - Camera-based scanning using @zxing/browser
    - Mobile-optimized (back camera preference)
    - Visual targeting overlay
    - Permission handling
+   - Duplicate scan prevention (2-second cooldown)
 
-5. **Offline Support** ✓
-   - Queue scans when offline
+4. **Offline Support** ✓
+   - Queue scans locally when offline
    - Auto-sync when connection restored
-   - Manual sync option
-   - Unsynced count indicator
+   - Manual sync option in Settings
+   - Unsynced count indicator in header
 
-6. **PWA Configuration** ✓
+5. **PWA Configuration** ✓
    - Web manifest for install-to-home-screen
    - Service worker for offline app shell
    - Mobile-optimized experience
 
-7. **Two Main Views** ✓
-   - **Settings**: OAuth login, spreadsheet selection/creation, sync management
+6. **Two Main Views** ✓
+   - **Settings**: Webhook configuration, manual sync, pending scans
    - **Scan**: Tag input, QR scanner, visual feedback
 
-8. **Data Transformation** ✓
-   - Placeholder async transformation function
+7. **Data Transformation** ✓
+   - Placeholder async transformation function (`deckTransform.ts`)
    - Ready for customization (deck ID extraction, API calls, etc.)
 
-9. **UI Components** ✓
+8. **UI Components** ✓
    - shadcn/ui styled components (Button, Input, Card)
    - Tailwind CSS v4 for styling
    - Responsive design
    - Dark theme by default
 
+9. **Local Storage** ✓
+   - Persists current tag between sessions
+   - Stores webhook URL and API key
+   - Maintains scan queue with sync status
+   - Housekeeping to clear synced items
+
 10. **Deployment Configuration** ✓
     - GitHub Actions workflow
-    - Environment variable injection
     - Vite configured for GitHub Pages
     - Base path handling
 
@@ -75,79 +76,135 @@ the-archivist/
 │   │   ├── ui/             # Base UI components
 │   │   ├── QRScanner.tsx   # QR scanning component
 │   │   ├── ScanView.tsx    # Scanning interface
-│   │   └── SettingsView.tsx # Configuration
+│   │   └── SettingsView.tsx # Webhook configuration
 │   ├── services/
-│   │   ├── storage.ts      # localStorage
-│   │   ├── syncService.ts  # Offline queue
-│   │   ├── deckTransform.ts # Data transformation
+│   │   ├── storage.ts      # localStorage persistence
+│   │   ├── syncService.ts  # Offline queue & batch sync
+│   │   ├── webhookService.ts # Make.com webhook integration
+│   │   ├── deckTransform.ts # QR data transformation
 │   │   └── serviceWorker.ts # PWA registration
 │   ├── lib/
 │   │   └── utils.ts        # Utilities
 │   ├── App.tsx             # Main app
 │   ├── main.tsx            # Entry point
 │   └── index.css           # Tailwind styles
-├── .env.example            # Environment template
 ├── SETUP.md                # Deployment guide
 ├── README.md               # Project documentation
 └── package.json
 ```
 
+## Architecture
+
+This app uses a **zero-infrastructure, webhook-based architecture**:
+
+### Data Flow
+1. User scans KeyForge deck QR code with device camera
+2. QR data passes through `transformDeckData()` (placeholder - currently passthrough)
+3. Scan record created with: `{ tag, deckData, timestamp }`
+4. Record added to local queue (localStorage)
+5. When user clicks "Send" or connection restored: batch sent to Make.com webhook
+6. Make.com scenario processes batch and writes to Google Sheets (or other destination)
+
+### Webhook Payload Format
+```json
+{
+  "scans": [
+    {
+      "tag": "Storage Box #3457",
+      "deckData": "https://www.keyforgegame.com/deck-details/abc-123-xyz",
+      "timestamp": "2025-11-22T12:34:56.789Z"
+    },
+    {
+      "tag": "Storage Box #3457",
+      "deckData": "https://www.keyforgegame.com/deck-details/def-456-uvw",
+      "timestamp": "2025-11-22T12:35:12.345Z"
+    }
+  ]
+}
+```
+
+### Key Design Decisions
+
+**Why Webhooks Instead of Direct Google Sheets API?**
+- No OAuth complexity for users
+- No Google Cloud setup required
+- Flexible backend (Google Sheets, Airtable, Notion, etc.)
+- Make.com handles authentication, retry logic, error handling
+- Free tier: 1,000 operations/month
+
+**Why Batch Submissions?**
+- Reduces webhook calls
+- More efficient for Make.com free tier
+- Better offline support (sync multiple scans at once)
+
+**Why localStorage?**
+- Offline-first design
+- No backend required
+- Fast and simple
+- User data stays on their device until synced
+
 ## Next Steps
 
-### 1. Google Cloud Setup
-Follow [SETUP.md](./SETUP.md) to:
-- Create Google Cloud project
-- Enable Sheets API
-- Configure OAuth consent screen
-- Create OAuth credentials
+### 1. Make.com Setup
+Create a Make.com scenario:
+1. **Webhook** → Custom Webhook (copy the URL)
+2. **Iterator** → Set array to `{{scans}}` from webhook
+3. **Google Sheets** → Add a Row
+   - Spreadsheet: Select your spreadsheet
+   - Sheet: Select sheet name
+   - Values: Map `{{timestamp}}`, `{{deckData}}`, `{{tag}}`
 
-### 2. GitHub Configuration
-- Add repository secrets:
-  - `VITE_GOOGLE_CLIENT_ID`
-  - `VITE_GOOGLE_REDIRECT_URI`
-- Enable GitHub Pages
-- Deploy via Actions
+Optional: Add API key validation in Make.com webhook settings
 
-### 3. First Deployment
+### 2. GitHub Pages Deployment
 ```bash
-git add .
-git commit -m "Initial implementation"
+# Enable GitHub Pages in repository settings
+# Set source to "GitHub Actions"
+
+# Push to main branch - automatic deployment
 git push origin main
 ```
 
-The GitHub Action will automatically build and deploy to GitHub Pages.
-
-### 4. Testing
-Once deployed:
+### 3. First Use
 1. Visit `https://jtrussell.github.io/the-archivist/`
-2. Sign in with Google
-3. Create or select a spreadsheet
-4. Test scanning with KeyForge deck QR codes
+2. Go to Settings → Enter webhook URL (and optional API key)
+3. Go to Scan → Enter location tag
+4. Click "Start Scanning" → Scan KeyForge deck QR codes
+5. Return to Settings → Click "Send X Scans" to submit batch
 
 ## Customization Points
 
 ### QR Data Transformation
-Edit `src/services/deckTransform.ts`:
+Edit `src/services/deckTransform.ts` to extract deck IDs from URLs:
 
 ```typescript
 export async function transformDeckData(qrData: string): Promise<string> {
-  // Extract deck ID from URL
+  // Extract deck ID from KeyForge URL
   const match = qrData.match(/deck-details\/([^/?]+)/)
   if (match) {
-    return match[1]
+    return match[1]  // Returns just "abc-123-xyz"
   }
 
-  // Or fetch additional data from API
-  // const response = await fetch(`https://api.example.com/decks/${deckId}`)
+  // Or fetch deck name from KeyForge API
+  // const deckId = match[1]
+  // const response = await fetch(`https://www.keyforgegame.com/api/decks/${deckId}/`)
   // const data = await response.json()
-  // return `${data.name} - ${deckId}`
+  // return `${data.name} (${deckId})`
 
-  return qrData
+  return qrData  // Fallback: return raw data
 }
 ```
 
-### Spreadsheet Columns
-Edit `src/services/googleSheets.ts` in `createSpreadsheet()` to change column headers or add additional data.
+### Webhook Payload Structure
+Edit `src/services/webhookService.ts` in `sendToWebhook()` to change the data structure sent to Make.com.
+
+### Google Sheets Structure
+Configure your Make.com scenario to map fields to columns:
+- Column A: Timestamp
+- Column B: Deck ID/Data
+- Column C: Location Tag
+
+Or add additional columns for deck name, houses, SAS rating, etc.
 
 ### Styling
 - Modify `src/index.css` for theme colors (CSS variables)
@@ -162,7 +219,7 @@ Replace placeholder icon in `public/` with:
 ## Known Items
 
 ### Bundle Size Warning
-The build shows a warning about chunk size (606 kB). This is expected because:
+The build shows a warning about chunk size (~600 kB). This is expected because:
 - @zxing/browser includes barcode detection algorithms (~400KB)
 - React and dependencies add to the bundle
 
@@ -173,40 +230,40 @@ The build shows a warning about chunk size (606 kB). This is expected because:
 
 If needed, could optimize by:
 - Code-splitting the scanner (lazy load on Scan view)
-- Using dynamic imports for Google APIs
+- Using dynamic imports
 
-### Unverified App Warning
-Users will see "This app isn't verified" during OAuth. This is expected for personal/small projects. Users can proceed safely by clicking "Advanced" → "Continue".
-
-To remove the warning (optional):
-- Submit app for OAuth verification (requires additional documentation)
-- Only necessary for public/commercial apps
+### Make.com Free Tier Limits
+- 1,000 operations/month
+- Each batch submission = 1 webhook call + N iterator operations (N = number of scans)
+- Example: 10 batches of 5 scans each = 10 + 50 = 60 operations
+- Plenty for personal use (hundreds of scans/month)
 
 ## Technical Notes
 
-### OAuth Security
-- Client ID is public by design (safe to expose)
-- Refresh tokens stored in localStorage
-- PKCE prevents authorization code interception
-- Each user's data isolated in their own Google account
+### Security
+- Webhook URL is public-facing (must be kept in user's device)
+- Optional API key provides basic authentication
+- No sensitive data stored (just deck IDs and location tags)
+- Each user configures their own webhook
 
 ### Offline Queue
-- Scans stored in localStorage when offline
+- Scans stored in localStorage when offline or before manual sync
 - Auto-synced when connection returns
 - Manual sync available in Settings
-- Synced items purged after 7 days
+- Synced items cleared after successful submission
 
 ### Browser Compatibility
 - **Camera API**: Requires HTTPS (GitHub Pages provides this)
 - **Service Workers**: All modern browsers
 - **localStorage**: Universal support
-- **Web Crypto (PKCE)**: All modern browsers
+- **@zxing/browser**: All modern browsers
 
 ### Mobile Considerations
 - Camera API works on iOS Safari (requires `playsinline` attribute - ✓ implemented)
 - PWA can be installed on iOS and Android
 - Back camera preferred on mobile devices
 - Touch-optimized UI
+- Visual feedback for successful scans
 
 ## Files Created
 
@@ -217,7 +274,6 @@ To remove the warning (optional):
 - `tailwind.config.js` - Tailwind CSS configuration
 - `postcss.config.js` - PostCSS plugins
 - `.gitignore` - Git exclusions
-- `.env.example` - Environment template
 
 **Application Code**:
 - All components in `src/components/`
@@ -231,7 +287,8 @@ To remove the warning (optional):
 
 **Documentation**:
 - `README.md` - Project overview
-- `SETUP.md` - Deployment guide
+- `SETUP.md` - Deployment guide (Make.com + GitHub Pages)
+- `QUICKSTART.md` - Quick reference
 - `IMPLEMENTATION_SUMMARY.md` - This file
 
 **CI/CD**:
@@ -240,29 +297,59 @@ To remove the warning (optional):
 ## Success Criteria - All Met ✓
 
 - [x] Zero backend infrastructure (client-side only)
-- [x] Zero cost (GitHub Pages + Google Sheets)
+- [x] Zero cost (GitHub Pages + Make.com free tier)
 - [x] Minimal dependencies (only essential packages)
-- [x] User owns their data (Google Sheets in user's account)
+- [x] User owns their data (via their own Make.com scenario)
 - [x] Offline support (queue + auto-sync)
 - [x] PWA capable (manifest + service worker)
 - [x] Mobile optimized (camera API, responsive UI)
-- [x] OAuth with PKCE (secure, no server secrets)
+- [x] Webhook-based data submission (no auth complexity)
 - [x] QR scanning (@zxing/browser)
-- [x] Three views (Settings, Scan, Lookup)
+- [x] Two views (Settings, Scan)
 - [x] Configurable transformation function
 - [x] GitHub Pages deployment ready
+- [x] Batch submission for efficiency
 - [x] Documentation complete
 
 ## Ready to Deploy!
 
 The project is fully implemented and ready for deployment. Follow SETUP.md for step-by-step deployment instructions.
 
+## Make.com Scenario Template
+
+### Basic Google Sheets Integration
+1. **Webhook** → Custom Webhook
+   - Copy webhook URL
+
+2. **Iterator** → Array = `{{scans}}`
+
+3. **Google Sheets** → Add a Row
+   - Timestamp: `{{timestamp}}`
+   - Deck Data: `{{deckData}}`
+   - Location Tag: `{{tag}}`
+
+### With Deck Name Lookup (Advanced)
+1. **Webhook** → Custom Webhook
+
+2. **Iterator** → Array = `{{scans}}`
+
+3. **HTTP** → Make a Request
+   - URL: `https://www.keyforgegame.com/api/decks/{{deckData}}/`
+   - Method: GET
+
+4. **Google Sheets** → Add a Row
+   - Timestamp: `{{timestamp}}`
+   - Deck ID: `{{deckData}}`
+   - Deck Name: `{{data.name}}`
+   - Location Tag: `{{tag}}`
+
 ## Support
 
 For issues during deployment:
 1. Check SETUP.md troubleshooting section
-2. Verify all secrets are set correctly
-3. Ensure OAuth redirect URI matches deployed URL exactly
+2. Verify webhook URL is configured correctly
+3. Test webhook in Make.com (use "Run Once" to see sample data)
 4. Check browser console for error messages
+5. Verify camera permissions on mobile devices
 
 Enjoy tracking your KeyForge decks!

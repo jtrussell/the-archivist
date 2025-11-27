@@ -1,0 +1,234 @@
+{
+  "name": "The Archivist - Deck Scanner to Google Sheets",
+  "flow": [
+    {
+      "id": 1,
+      "module": "gateway:CustomWebHook",
+      "version": 1,
+      "parameters": {
+        "hook": 1,
+        "maxResults": 1
+      },
+      "mapper": {},
+      "metadata": {
+        "designer": {
+          "x": 0,
+          "y": 0
+        },
+        "restore": {
+          "parameters": {
+            "hook": {
+              "label": "The Archivist Webhook"
+            }
+          }
+        },
+        "expect": [
+          {
+            "name": "scans",
+            "type": "array",
+            "label": "Scans",
+            "spec": [
+              {
+                "name": "timestamp",
+                "type": "text",
+                "label": "Timestamp"
+              },
+              {
+                "name": "deckData",
+                "type": "text",
+                "label": "Deck Data"
+              },
+              {
+                "name": "deckName",
+                "type": "text",
+                "label": "Deck Name"
+              },
+              {
+                "name": "tag",
+                "type": "text",
+                "label": "Tag"
+              }
+            ]
+          }
+        ],
+        "advanced": true
+      }
+    },
+    {
+      "id": 2,
+      "module": "builtin:BasicRouter",
+      "version": 1,
+      "parameters": {},
+      "mapper": null,
+      "metadata": {
+        "designer": {
+          "x": 300,
+          "y": 0
+        }
+      },
+      "routes": [
+        {
+          "flow": [
+            {
+              "id": 3,
+              "module": "builtin:Iterator",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "array": "{{1.scans}}"
+              },
+              "metadata": {
+                "designer": {
+                  "x": 600,
+                  "y": 0
+                },
+                "restore": {
+                  "expect": {
+                    "array": {
+                      "mode": "edit"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "id": 4,
+              "module": "google-sheets:addRow",
+              "version": 3,
+              "parameters": {
+                "__IMTCONN__": 1
+              },
+              "mapper": {
+                "select": "map",
+                "mode": "select",
+                "spreadsheetId": "",
+                "sheetId": "",
+                "tableFirstLine": "true",
+                "values": {
+                  "timestamp": "{{3.timestamp}}",
+                  "deckId": "{{3.deckData}}",
+                  "deckName": "{{if(3.deckName != null; 3.deckName; \"\")}}",
+                  "tag": "{{3.tag}}"
+                }
+              },
+              "metadata": {
+                "designer": {
+                  "x": 900,
+                  "y": 0
+                },
+                "restore": {
+                  "expect": {
+                    "select": {
+                      "mode": "edit"
+                    },
+                    "mode": {
+                      "label": "Select from list"
+                    },
+                    "tableFirstLine": {
+                      "mode": "chose",
+                      "label": "Yes"
+                    }
+                  },
+                  "parameters": {
+                    "__IMTCONN__": {
+                      "label": "My Google Sheets connection",
+                      "data": {
+                        "scoped": "true",
+                        "connection": "google"
+                      }
+                    }
+                  }
+                },
+                "parameters": [
+                  {
+                    "name": "__IMTCONN__",
+                    "type": "account:google",
+                    "label": "Connection",
+                    "required": true
+                  }
+                ],
+                "expect": [
+                  {
+                    "name": "mode",
+                    "type": "select",
+                    "label": "Choose a Method",
+                    "required": true,
+                    "validate": {
+                      "enum": [
+                        "select",
+                        "fromAll",
+                        "map"
+                      ]
+                    }
+                  },
+                  {
+                    "name": "spreadsheetId",
+                    "type": "text",
+                    "label": "Spreadsheet ID",
+                    "required": true
+                  },
+                  {
+                    "name": "sheetId",
+                    "type": "text",
+                    "label": "Sheet Name",
+                    "required": true
+                  },
+                  {
+                    "name": "tableFirstLine",
+                    "type": "boolean",
+                    "label": "Table contains headers",
+                    "required": true
+                  },
+                  {
+                    "name": "values",
+                    "type": "collection",
+                    "label": "Values",
+                    "spec": [
+                      {
+                        "name": "timestamp",
+                        "type": "text",
+                        "label": "Timestamp"
+                      },
+                      {
+                        "name": "deckId",
+                        "type": "text",
+                        "label": "Deck ID"
+                      },
+                      {
+                        "name": "deckName",
+                        "type": "text",
+                        "label": "Deck Name"
+                      },
+                      {
+                        "name": "tag",
+                        "type": "text",
+                        "label": "Tag"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "version": 1,
+    "scenario": {
+      "roundtrips": 1,
+      "maxErrors": 3,
+      "autoCommit": false,
+      "sequential": false,
+      "confidential": false,
+      "dataloss": false,
+      "dlq": false,
+      "freshVariables": false
+    },
+    "designer": {
+      "orphans": []
+    },
+    "zone": "us1.make.com"
+  }
+}
