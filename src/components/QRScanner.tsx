@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { BrowserMultiFormatReader } from '@zxing/browser'
+import { BrowserQRCodeReader } from '@zxing/browser'
 import { Button } from './ui/button'
 
 interface QRScannerProps {
@@ -12,7 +12,8 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
   const videoRef = useRef<HTMLVideoElement>(null)
   const [hasPermission, setHasPermission] = useState<boolean | null>(null)
   const [isScanning, setIsScanning] = useState(false)
-  const readerRef = useRef<BrowserMultiFormatReader | null>(null)
+  const readerRef = useRef<BrowserQRCodeReader | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (!scanning) {
@@ -30,19 +31,25 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
   const startScanning = async () => {
     if (!videoRef.current || isScanning) return
 
+    // Create abort controller for this scan session
+    abortControllerRef.current = new AbortController()
+
     try {
+      // Create reader if it doesn't exist
       if (!readerRef.current) {
-        readerRef.current = new BrowserMultiFormatReader()
+        readerRef.current = new BrowserQRCodeReader()
       }
 
       const reader = readerRef.current
 
-      const videoInputDevices = await BrowserMultiFormatReader.listVideoInputDevices()
+      // Get available cameras
+      const videoInputDevices = await BrowserQRCodeReader.listVideoInputDevices()
 
       if (videoInputDevices.length === 0) {
         throw new Error('No camera found on this device')
       }
 
+      // Prefer back camera on mobile devices
       const backCamera = videoInputDevices.find((device: MediaDeviceInfo) =>
         device.label.toLowerCase().includes('back')
       )
@@ -51,23 +58,27 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
       setIsScanning(true)
       setHasPermission(true)
 
-      reader.decodeFromVideoDevice(
+      // Scan once and automatically stop
+      const result = await reader.decodeOnceFromVideoDevice(
         selectedDeviceId,
-        videoRef.current,
-        (result, error) => {
-          if (result) {
-            const text = result.getText()
-            onScan(text)
-            stopScanning()
-          }
-
-          if (error && error.name !== 'NotFoundException') {
-            console.error('Scan error:', error)
-          }
-        }
+        videoRef.current
       )
+
+      // Check if scan was aborted
+      if (abortControllerRef.current?.signal.aborted) {
+        return
+      }
+
+      const text = result.getText()
+      onScan(text)
+
     } catch (error) {
-      console.error('Failed to start scanner:', error)
+      // Ignore errors from aborted scans
+      if (abortControllerRef.current?.signal.aborted) {
+        return
+      }
+
+      console.error('Failed to scan:', error)
       setHasPermission(false)
       setIsScanning(false)
 
@@ -78,13 +89,21 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
   }
 
   const stopScanning = () => {
-    readerRef.current = null
+    // Abort any ongoing scan
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
+
+    // Stop video stream
     if (videoRef.current) {
       const stream = videoRef.current.srcObject as MediaStream | null
       if (stream) {
         stream.getTracks().forEach(track => track.stop())
       }
+      videoRef.current.srcObject = null
     }
+
     setIsScanning(false)
   }
 

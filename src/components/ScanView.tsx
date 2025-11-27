@@ -13,17 +13,11 @@ interface ScanViewProps {
 export function ScanView({ isConfigured }: ScanViewProps) {
   const { state, updateState } = useAppState()
   const [scanning, setScanning] = useState(false)
-  const [lastScan, setLastScan] = useState<{ data: string; timestamp: Date } | null>(null)
   const [status, setStatus] = useState<'idle' | 'success' | 'error' | 'queued'>('idle')
   const [message, setMessage] = useState('')
 
   const handleScan = async (qrData: string) => {
-    if (lastScan && lastScan.data === qrData && Date.now() - lastScan.timestamp.getTime() < 2000) {
-      return
-    }
-
-    setLastScan({ data: qrData, timestamp: new Date() })
-
+    // Temporarily stop scanning while processing
     setScanning(false)
 
     try {
@@ -36,9 +30,22 @@ export function ScanView({ isConfigured }: ScanViewProps) {
         setStatus('error')
         setMessage(result.error || 'Failed to record scan')
       }
+
+      // Automatically restart scanning for next deck
+      setTimeout(() => {
+        setScanning(true)
+        setStatus('idle')
+      }, 1000)
+
     } catch (error) {
       setStatus('error')
       setMessage(error instanceof Error ? error.message : 'Unknown error')
+
+      // Restart scanning after error
+      setTimeout(() => {
+        setScanning(true)
+        setStatus('idle')
+      }, 2000)
     }
   }
 
