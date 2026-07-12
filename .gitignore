@@ -24,6 +24,7 @@ dist-ssr
 *.sw?
 
 # Environment variables
-.env
+# .env is intentionally committed: it holds only the Supabase URL and anon
+# key, which are public by design (RLS is the security boundary).
 .env.local
 .env.production

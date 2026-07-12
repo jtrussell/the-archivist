@@ -1,43 +1,63 @@
 /**
- * Sync service for handling offline queue and batch submissions
+ * Sync service for handling the offline queue and Supabase submission
  */
 
-import { getUnsyncedQueueItems, markQueueItemSynced, addToScanQueue, clearSyncedQueueItems } from './storage'
-import { sendToWebhook, WebhookPayload } from './webhookService'
-import { transformDeckData } from './deckTransform'
+import {
+  getUnsyncedQueueItems,
+  markQueueItemSynced,
+  addToScanQueue,
+  clearSyncedQueueItems,
+  updateQueueItem,
+} from './storage'
+import { recordScanToDb } from './scanService'
+import { parseAndFetchDeck, fetchDeckName } from './deckTransform'
+import { supabase } from '../lib/supabase'
 
 export interface ScanResult {
   success: boolean
   queued: boolean
+  /** Position assigned by the database, when the scan synced immediately */
+  position?: number
   error?: string
 }
 
+export interface SyncSummary {
+  synced: number
+  failed: number
+  errors: string[]
+  /** Position assigned to the last successfully synced scan */
+  lastPosition?: number
+}
+
 /**
- * Record a scan (queued for batch submission)
+ * Record a scan: parse the QR data, queue it, and sync immediately when online
  */
 export async function recordScan(
   rawQRData: string,
-  tag: string
+  label: string
 ): Promise<ScanResult> {
   try {
-    // Transform the deck data
-    const deckData = await transformDeckData(rawQRData)
+    const deck = await parseAndFetchDeck(rawQRData)
+    const scannedAt = new Date().toISOString()
 
-    // Create timestamp
-    const timestamp = new Date().toISOString()
-
-    // Always queue for batch submission
     addToScanQueue({
-      timestamp,
-      deckData,
-      tag,
+      scannedAt,
+      label,
+      deckId: deck.deckId,
+      deckCode: deck.deckCode,
+      deckUuid: deck.deckUuid,
+      deckName: deck.deckName,
       synced: false,
     })
 
-    return {
-      success: true,
-      queued: true,
+    if (navigator.onLine) {
+      const result = await syncQueue()
+      if (result.failed === 0 && result.lastPosition !== undefined) {
+        return { success: true, queued: false, position: result.lastPosition }
+      }
     }
+
+    return { success: true, queued: true }
   } catch (error) {
     console.error('Failed to record scan:', error)
     return {
@@ -48,54 +68,80 @@ export async function recordScan(
   }
 }
 
+let syncInFlight: Promise<SyncSummary> | null = null
+
 /**
- * Sync all unsynced items in the queue as a batch
+ * Sync unsynced queue items sequentially, in scan order.
+ * Stops on the first failure so order (and therefore positions) is preserved
+ * on retry. Items stay queued if there is no active session.
+ * Concurrent callers share a single flush to avoid double-inserting items.
  */
-export async function syncQueue(): Promise<{
-  synced: number
-  failed: number
-  errors: string[]
-}> {
+export async function syncQueue(): Promise<SyncSummary> {
+  if (syncInFlight) return syncInFlight
+
+  syncInFlight = doSyncQueue().finally(() => {
+    syncInFlight = null
+  })
+  return syncInFlight
+}
+
+async function doSyncQueue(): Promise<SyncSummary> {
   const unsynced = getUnsyncedQueueItems()
 
   if (unsynced.length === 0) {
-    return {
-      synced: 0,
-      failed: 0,
-      errors: [],
-    }
+    return { synced: 0, failed: 0, errors: [] }
   }
 
-  try {
-    // Convert queue items to webhook payload
-    const payload: WebhookPayload[] = unsynced.map(item => ({
-      tag: item.tag,
-      deckData: item.deckData,
-      timestamp: item.timestamp,
-    }))
-
-    // Send batch to webhook
-    await sendToWebhook(payload)
-
-    // Mark all items as synced
-    unsynced.forEach(item => markQueueItemSynced(item.id))
-
-    // Housekeeping: clear synced items
-    setTimeout(clearSyncedQueueItems, 1000)
-
-    return {
-      synced: unsynced.length,
-      failed: 0,
-      errors: [],
-    }
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session) {
     return {
       synced: 0,
       failed: unsynced.length,
-      errors: [errorMsg],
+      errors: ['Sign in required to sync scans'],
     }
   }
+
+  let syncedCount = 0
+  let lastPosition: number | undefined
+
+  for (const item of unsynced) {
+    try {
+      // Backfill the deck name if the fetch failed at scan time (e.g. offline)
+      let deckName = item.deckName
+      if (deckName === null) {
+        deckName = await fetchDeckName(item)
+        if (deckName !== null) {
+          updateQueueItem(item.id, { deckName })
+        }
+      }
+
+      const recorded = await recordScanToDb({
+        label: item.label,
+        deckId: item.deckId,
+        deckName,
+        deckCode: item.deckCode,
+        deckUuid: item.deckUuid,
+        scannedAt: item.scannedAt,
+      })
+
+      markQueueItemSynced(item.id)
+      syncedCount++
+      lastPosition = recorded.position
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+      return {
+        synced: syncedCount,
+        failed: unsynced.length - syncedCount,
+        errors: [errorMsg],
+        lastPosition,
+      }
+    }
+  }
+
+  // Housekeeping: clear synced items
+  setTimeout(clearSyncedQueueItems, 1000)
+
+  return { synced: syncedCount, failed: 0, errors: [], lastPosition }
 }
 
 /**

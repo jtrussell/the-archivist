@@ -3,29 +3,29 @@
  */
 
 export interface AppState {
-  currentTag: string
-  webhookUrl: string | null
-  webhookApiKey: string | null
+  currentLabel: string
   lastSyncTime: number | null
 }
 
 export interface ScanQueueItem {
   id: string
-  timestamp: string
-  deckData: string
-  tag: string
+  scannedAt: string
+  label: string
+  deckId: string
+  deckCode: string | null
+  deckUuid: string | null
+  deckName: string | null
   synced: boolean
 }
 
+// v2: keys bumped for the Supabase migration so stale Make.com-era data is ignored
 const STORAGE_KEYS = {
-  APP_STATE: 'archivist_app_state',
-  SCAN_QUEUE: 'archivist_scan_queue',
+  APP_STATE: 'archivist_app_state_v2',
+  SCAN_QUEUE: 'archivist_scan_queue_v2',
 } as const
 
 const DEFAULT_APP_STATE: AppState = {
-  currentTag: '',
-  webhookUrl: null,
-  webhookApiKey: null,
+  currentLabel: '',
   lastSyncTime: null,
 }
 
@@ -102,18 +102,25 @@ export function addToScanQueue(item: Omit<ScanQueueItem, 'id'>): string {
 }
 
 /**
- * Mark queue item as synced
+ * Update fields on a queue item (e.g. backfilled deck name)
  */
-export function markQueueItemSynced(id: string): void {
+export function updateQueueItem(id: string, updates: Partial<ScanQueueItem>): void {
   try {
     const queue = getScanQueue()
     const updated = queue.map(item =>
-      item.id === id ? { ...item, synced: true } : item
+      item.id === id ? { ...item, ...updates } : item
     )
     localStorage.setItem(STORAGE_KEYS.SCAN_QUEUE, JSON.stringify(updated))
   } catch (error) {
-    console.error('Error marking queue item as synced:', error)
+    console.error('Error updating queue item:', error)
   }
+}
+
+/**
+ * Mark queue item as synced
+ */
+export function markQueueItemSynced(id: string): void {
+  updateQueueItem(id, { synced: true })
 }
 
 /**
@@ -134,14 +141,6 @@ export function clearSyncedQueueItems(): void {
   } catch (error) {
     console.error('Error clearing synced queue items:', error)
   }
-}
-
-/**
- * Check if webhook is configured
- */
-export function isWebhookConfigured(): boolean {
-  const state = getAppState()
-  return !!state.webhookUrl && state.webhookUrl.trim().length > 0
 }
 
 /**

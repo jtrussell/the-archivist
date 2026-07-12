@@ -1,16 +1,28 @@
 import { useState, useEffect } from 'react'
 import { SettingsView } from './components/SettingsView'
 import { ScanView } from './components/ScanView'
-import { isWebhookConfigured } from './services/storage'
+import { SearchView } from './components/SearchView'
+import { SignInView } from './components/SignInView'
+import { AuthProvider, useAuth } from './hooks/useAuth'
 import { setupAutoSync, getUnsyncedCount } from './services/syncService'
 
-function App() {
-  const [view, setView] = useState<'settings' | 'scan'>('settings')
-  const [configured, setConfigured] = useState(false)
+type View = 'scan' | 'search' | 'settings'
+
+const NAV_ITEMS: { view: View; label: string }[] = [
+  { view: 'scan', label: 'Scan' },
+  { view: 'search', label: 'Search' },
+  { view: 'settings', label: 'Settings' },
+]
+
+function AppContent() {
+  const { session, loading } = useAuth()
+  const [view, setView] = useState<View>('scan')
   const [unsyncedCount, setUnsyncedCount] = useState(0)
 
   useEffect(() => {
-    checkConfig()
+    if (!session) return
+
+    setUnsyncedCount(getUnsyncedCount())
 
     // Setup auto-sync for offline queue
     setupAutoSync()
@@ -21,12 +33,7 @@ function App() {
     }, 5000)
 
     return () => clearInterval(interval)
-  }, [])
-
-  const checkConfig = () => {
-    setConfigured(isWebhookConfigured())
-    setUnsyncedCount(getUnsyncedCount())
-  }
+  }, [session])
 
   return (
     <div className="min-h-screen bg-background">
@@ -41,43 +48,52 @@ function App() {
         </div>
       </header>
 
-      <nav className="border-b">
-        <div className="container mx-auto px-4">
-          <div className="flex gap-4">
-            <button
-              onClick={() => setView('settings')}
-              className={`px-4 py-2 transition-colors ${
-                view === 'settings'
-                  ? 'border-b-2 border-primary font-medium'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              Settings
-            </button>
-            <button
-              onClick={() => setView('scan')}
-              className={`px-4 py-2 transition-colors ${
-                view === 'scan'
-                  ? 'border-b-2 border-primary font-medium'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              Scan
-            </button>
-          </div>
-        </div>
-      </nav>
+      {loading ? (
+        <main className="container mx-auto px-4 py-8">
+          <p className="text-center text-muted-foreground">Loading...</p>
+        </main>
+      ) : !session ? (
+        <main className="container mx-auto px-4 py-8">
+          <SignInView />
+        </main>
+      ) : (
+        <>
+          <nav className="border-b">
+            <div className="container mx-auto px-4">
+              <div className="flex gap-4">
+                {NAV_ITEMS.map(({ view: v, label }) => (
+                  <button
+                    key={v}
+                    onClick={() => setView(v)}
+                    className={`px-4 py-2 transition-colors ${
+                      view === v
+                        ? 'border-b-2 border-primary font-medium'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </nav>
 
-      <main className="container mx-auto px-4 py-8">
-        {view === 'settings' && (
-          <SettingsView
-            isConfigured={configured}
-            onConfigChange={checkConfig}
-          />
-        )}
-        {view === 'scan' && <ScanView isConfigured={configured} />}
-      </main>
+          <main className="container mx-auto px-4 py-8">
+            {view === 'scan' && <ScanView />}
+            {view === 'search' && <SearchView />}
+            {view === 'settings' && <SettingsView />}
+          </main>
+        </>
+      )}
     </div>
+  )
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   )
 }
 

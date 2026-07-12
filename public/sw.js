@@ -1,6 +1,6 @@
 /* Service Worker for The Archivist PWA */
 
-const CACHE_NAME = 'archivist-v1'
+const CACHE_NAME = 'archivist-v2'
 const urlsToCache = [
   '/the-archivist/',
   '/the-archivist/index.html',

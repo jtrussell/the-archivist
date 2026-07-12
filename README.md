@@ -5,85 +5,97 @@ A minimal-footprint web application for tracking KeyForge deck locations by scan
 ## Features
 
 - **QR Code Scanning**: Use your device camera to scan KeyForge deck QR codes
-- **Location Tagging**: Associate decks with custom location tags (e.g., "Storage Box #3457")
-- **Webhook Integration**: Send scan data to Make.com for flexible storage options
-- **Batch Submissions**: Queue scans locally and submit in batches to reduce API calls
+- **Location Labels**: File decks under custom location labels (e.g., "Storage Box #3457"), picking from labels you've used before or creating new ones
+- **Position Counter**: Each deck gets an incrementing position within its label, so you know exactly where in the box it sits
+- **Deck Names**: Deck names are looked up automatically from the KeyForge Master Vault API at scan time
+- **Search**: Find any deck's current location and position by name
+- **Google Sign-In**: Your scans and labels are private to your account (Supabase Auth)
 - **Offline Support**: Scans are queued when offline and synced when online
 - **PWA**: Install as a mobile app for quick access
-- **Zero Infrastructure**: No backend servers, completely client-side
-- **Free**: Uses only free services (GitHub Pages + Make.com free tier)
+- **Zero Infrastructure**: Static frontend on GitHub Pages + a free Supabase project
 
 ## Quick Start
 
 1. Visit the deployed app: `https://jtrussell.github.io/the-archivist/`
-2. Configure your Make.com webhook URL in Settings
-3. Enter a location tag
-4. Start scanning!
-5. Send batched scans to your webhook
+2. Sign in with Google
+3. Pick or create a location label
+4. Start scanning — each deck is stored with the next position in that label
+5. Use the Search tab to find decks later
 
-## Setup
+## Setup (self-hosting)
 
-See [SETUP.md](./SETUP.md) for detailed deployment instructions.
+You need a free Supabase project and a Google OAuth client.
 
-### Quick Setup Summary
+### 1. Supabase
 
-1. **Make.com**:
-   - Create a free account
-   - Create a scenario with a custom webhook
-   - Add data processing modules (Google Sheets, Airtable, etc.)
-   - Copy the webhook URL
+1. Create a project at [supabase.com](https://supabase.com)
+2. Open the SQL Editor and run the contents of [`supabase/schema.sql`](./supabase/schema.sql)
+3. Under **Auth → URL Configuration**:
+   - Site URL: `https://<your-username>.github.io/the-archivist/`
+   - Redirect URLs: `https://<your-username>.github.io/the-archivist/**` and `http://localhost:5173/**`
+4. Copy the Project URL and anon key (**Settings → API**) into `.env`:
+   ```
+   VITE_SUPABASE_URL=https://your-project-ref.supabase.co
+   VITE_SUPABASE_ANON_KEY=your-anon-key
+   ```
+   These values are public by design; Row Level Security protects the data.
 
-2. **GitHub**:
-   - Fork or clone this repository
-   - Enable GitHub Pages
-   - Deploy via Actions (no secrets required!)
+### 2. Google OAuth (for Supabase Auth)
 
-3. **First Use**:
-   - Configure webhook URL in Settings
-   - Enter a location tag
-   - Start scanning decks!
-   - Submit scans in batches
+1. In [Google Cloud Console](https://console.cloud.google.com), configure the OAuth consent screen (External; add yourself as a test user)
+2. Create an OAuth client ID (type: Web application) with the authorized redirect URI shown in Supabase's **Auth → Providers → Google** panel (`https://<project-ref>.supabase.co/auth/v1/callback`)
+3. Paste the Client ID and Secret into Supabase's Google provider settings and enable it
+
+### 3. GitHub Pages
+
+Push to `main` — the included workflow builds and deploys automatically. No repository secrets required.
 
 ## Technology Stack
 
 - **Frontend**: React + TypeScript + Vite
-- **UI**: Tailwind CSS + shadcn/ui components
+- **UI**: Tailwind CSS + shadcn/ui-style components
 - **QR Scanning**: @zxing/browser
-- **Data Submission**: Make.com webhooks
+- **Backend**: Supabase (Postgres + Auth), free tier
+- **Deck Names**: KeyForge Master Vault API
 - **Hosting**: GitHub Pages
 - **PWA**: Service Worker + Web Manifest
 
-## Architecture
+## Data Model
 
-This app is designed with zero backend infrastructure:
-
-- **Client-side only**: All logic runs in the browser
-- **Webhook-based**: No authentication needed, just configure your webhook
-- **Batch processing**: Reduce API calls by submitting scans in batches
-- **Offline-first**: Scans are queued locally and synced when online
-- **User-owned data**: Everything is sent to YOUR webhook and stored wherever you choose
+- `labels` — one row per location label, per user
+- `scans` — append-only history: every scan stores the deck ID (code or Master Vault UUID), deck name, label, an atomically assigned per-label position, and the time of scan
+- `current_deck_locations` — view returning each deck's most recent scan (its current location), used by Search
+- Positions are assigned inside the `record_scan` database function, so rapid scanning and multiple devices can't collide
+- Row Level Security keeps every user's data private to their account
 
 ## Project Structure
 
 ```
 the-archivist/
 ├── src/
-│   ├── components/         # React components
-│   │   ├── ui/            # shadcn/ui base components
-│   │   ├── QRScanner.tsx  # QR code scanner
-│   │   ├── ScanView.tsx   # Main scanning interface
+│   ├── components/          # React components
+│   │   ├── ui/              # shadcn-style base components (incl. combobox)
+│   │   ├── QRScanner.tsx    # QR code scanner
+│   │   ├── ScanView.tsx     # Main scanning interface
+│   │   ├── SearchView.tsx   # Deck search
+│   │   ├── SignInView.tsx   # Auth gate
 │   │   └── SettingsView.tsx
-│   ├── services/          # Core services
-│   │   ├── webhookService.ts  # Webhook submission
-│   │   ├── syncService.ts     # Batch queue management
-│   │   ├── storage.ts         # localStorage persistence
-│   │   └── deckTransform.ts   # QR data transformation
-│   ├── lib/               # Utilities
-│   └── App.tsx            # Main app component
-├── public/                # Static assets
-│   ├── manifest.json      # PWA manifest
-│   └── sw.js             # Service worker
-└── .github/workflows/     # GitHub Actions
+│   ├── hooks/
+│   │   ├── useAuth.tsx      # Supabase auth context
+│   │   └── useAppState.ts   # localStorage-backed app state
+│   ├── services/
+│   │   ├── scanService.ts   # Supabase reads/writes (RPC, labels, search)
+│   │   ├── syncService.ts   # Offline queue + flush
+│   │   ├── storage.ts       # localStorage persistence
+│   │   └── deckTransform.ts # QR parsing + Master Vault name lookup
+│   ├── lib/
+│   │   ├── supabase.ts      # Supabase client
+│   │   └── utils.ts
+│   └── App.tsx
+├── supabase/
+│   └── schema.sql           # Database schema (run once in the SQL Editor)
+├── public/                  # Static assets (PWA manifest, service worker)
+└── .github/workflows/       # GitHub Pages deploy
 ```
 
 ## Development
@@ -91,30 +103,19 @@ the-archivist/
 ### Prerequisites
 
 - Node.js 18+
-- npm or yarn
-- A Make.com account (for testing webhooks)
+- A Supabase project (see Setup above)
 
 ### Local Development
 
-1. Clone the repository:
 ```bash
 git clone https://github.com/jtrussell/the-archivist.git
 cd the-archivist
-```
-
-2. Install dependencies:
-```bash
 npm install
-```
-
-3. Start dev server:
-```bash
 npm run dev
 ```
 
-4. Open `http://localhost:5173/` in your browser
-
-5. Configure your webhook URL in the Settings tab
+Open `http://localhost:5173/` and sign in with Google. Make sure
+`http://localhost:5173/**` is in your Supabase redirect URLs.
 
 ### Build
 
@@ -126,66 +127,6 @@ npm run build
 
 Push to `main` branch or manually trigger the "Deploy to GitHub Pages" workflow in Actions.
 
-## Customization
-
-### QR Data Transformation
-
-The app includes a placeholder transformation function in `src/services/deckTransform.ts`. Customize this to:
-
-- Extract deck IDs from URLs
-- Fetch deck names from external APIs
-- Parse additional metadata
-- Validate deck data
-
-Example:
-```typescript
-export async function transformDeckData(qrData: string): Promise<string> {
-  // Extract deck ID from KeyForge URL
-  const match = qrData.match(/deck-details\/([^/?]+)/)
-  if (match) {
-    const deckId = match[1]
-
-    // Optionally: fetch deck name from API
-    // const deckName = await fetchDeckName(deckId)
-    // return `${deckId} - ${deckName}`
-
-    return deckId
-  }
-
-  return qrData
-}
-```
-
-### Webhook Payload
-
-The app sends data in this format:
-```json
-{
-  "scans": [
-    {
-      "tag": "Storage Box #3457",
-      "deckData": "abc-123-xyz",
-      "timestamp": "2025-11-04T12:34:56.789Z"
-    }
-  ]
-}
-```
-
-You can customize this in `src/services/webhookService.ts`.
-
-### Make.com Scenario Examples
-
-**Google Sheets**:
-1. Webhook → Custom Webhook
-2. Iterator → `{{scans}}`
-3. Google Sheets → Add a Row
-
-**Airtable with Slack Notifications**:
-1. Webhook → Custom Webhook
-2. Iterator → `{{scans}}`
-3. Airtable → Create a Record
-4. Slack → Send a Message
-
 ## Use Cases
 
 - **Collection Management**: Track which decks are in which storage boxes
@@ -193,14 +134,6 @@ You can customize this in `src/services/webhookService.ts`.
 - **Tournament Organization**: Track deck check-in/check-out
 - **Personal Organization**: Know where every deck is at all times
 - **Deck Library**: Build a searchable catalog of your collection
-
-## Why Make.com?
-
-- **Free tier**: 1,000 operations/month (plenty for personal use)
-- **No coding**: Visual workflow builder
-- **Flexible**: 1,000+ integrations available
-- **Reliable**: Built-in error handling and retry logic
-- **Debuggable**: Execution history for troubleshooting
 
 ## Contributing
 
@@ -213,13 +146,7 @@ MIT License - see LICENSE file for details
 ## Acknowledgments
 
 - Built with [Vite](https://vitejs.dev/) and [React](https://react.dev/)
-- UI components from [shadcn/ui](https://ui.shadcn.com/)
+- UI components inspired by [shadcn/ui](https://ui.shadcn.com/)
 - QR scanning via [@zxing/browser](https://github.com/zxing-js/browser)
-- Webhook automation by [Make.com](https://www.make.com/)
+- Backend by [Supabase](https://supabase.com/)
 - Inspired by the need to find that one specific KeyForge deck in a pile of 500
-
-## Support
-
-For setup help, see [SETUP.md](./SETUP.md) or [QUICKSTART.md](./QUICKSTART.md).
-
-For issues or questions, please open a GitHub issue.

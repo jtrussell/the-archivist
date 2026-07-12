@@ -1,31 +1,78 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { QRScanner } from './QRScanner'
 import { Button } from './ui/button'
-import { Input } from './ui/input'
+import { Combobox } from './ui/combobox'
 import { Card, CardContent } from './ui/card'
 import { recordScan } from '../services/syncService'
+import { getLabels, getMaxPosition } from '../services/scanService'
+import { getUnsyncedQueueItems } from '../services/storage'
 import { useAppState } from '../hooks/useAppState'
 
-interface ScanViewProps {
-  isConfigured: boolean
+function countQueuedForLabel(label: string): number {
+  return getUnsyncedQueueItems().filter((item) => item.label === label).length
 }
 
-export function ScanView({ isConfigured }: ScanViewProps) {
+export function ScanView() {
   const { state, updateState } = useAppState()
   const [scanning, setScanning] = useState(false)
   const [status, setStatus] = useState<'idle' | 'success' | 'error' | 'queued'>('idle')
   const [message, setMessage] = useState('')
+  const [labels, setLabels] = useState<string[]>([])
+  const [maxPosition, setMaxPosition] = useState<number | null>(null)
+
+  const label = state.currentLabel
+
+  useEffect(() => {
+    getLabels()
+      .then((rows) => setLabels(rows.map((r) => r.name)))
+      .catch((error) => console.error('Failed to load labels:', error))
+  }, [])
+
+  // Look up the stored max position when the label settles
+  useEffect(() => {
+    const trimmed = label.trim()
+    if (!trimmed) {
+      setMaxPosition(null)
+      return
+    }
+
+    setMaxPosition(null)
+    const timeout = setTimeout(() => {
+      getMaxPosition(trimmed)
+        .then(setMaxPosition)
+        .catch((error) => {
+          console.error('Failed to load position:', error)
+          setMaxPosition(0)
+        })
+    }, 400)
+
+    return () => clearTimeout(timeout)
+  }, [label])
+
+  const nextPosition =
+    maxPosition === null ? null : maxPosition + countQueuedForLabel(label.trim()) + 1
 
   const handleScan = async (qrData: string) => {
     // Temporarily stop scanning while processing
     setScanning(false)
 
     try {
-      const result = await recordScan(qrData, state.currentTag)
+      const result = await recordScan(qrData, label.trim())
 
-      if (result.success) {
+      if (result.success && result.position !== undefined) {
+        setStatus('success')
+        setMessage(`Stored as #${result.position} in ${label.trim()}`)
+        setMaxPosition(result.position)
+        if (!labels.includes(label.trim())) {
+          setLabels([label.trim(), ...labels])
+        }
+      } else if (result.success) {
         setStatus('queued')
-        setMessage('Scan queued!')
+        setMessage(
+          nextPosition !== null
+            ? `Queued as #${nextPosition} (will sync when online)`
+            : 'Scan queued! (will sync when online)'
+        )
       } else {
         setStatus('error')
         setMessage(result.error || 'Failed to record scan')
@@ -54,40 +101,30 @@ export function ScanView({ isConfigured }: ScanViewProps) {
     setMessage(error.message)
   }
 
-  if (!isConfigured) {
-    return (
-      <div className="flex flex-col items-center justify-center p-8">
-        <Card className="max-w-md">
-          <CardContent className="pt-6">
-            <p className="text-center text-muted-foreground mb-4">
-              Please configure a webhook before scanning
-            </p>
-            <p className="text-sm text-center text-muted-foreground">
-              Go to Settings to set your Make.com webhook URL
-            </p>
-          </CardContent>
-        </Card>
-      </div>
-    )
-  }
-
   return (
     <div className="space-y-6 max-w-2xl mx-auto">
       <Card>
         <CardContent className="pt-6">
           <label className="block text-sm font-medium mb-2">
-            Current Location Tag
+            Location Label
           </label>
-          <Input
-            type="text"
-            value={state.currentTag}
-            onChange={(e) => updateState({ currentTag: e.target.value })}
+          <Combobox
+            value={label}
+            onChange={(value) => updateState({ currentLabel: value })}
+            options={labels}
             placeholder="e.g., Storage Box #3457"
             className="text-lg"
           />
-          <p className="text-sm text-muted-foreground mt-2">
-            All scanned decks will be tagged with this location
-          </p>
+          <div className="flex justify-between items-center mt-2">
+            <p className="text-sm text-muted-foreground">
+              Pick a previous label or type a new one
+            </p>
+            {label.trim() && (
+              <p className="text-sm font-medium">
+                {nextPosition === null ? 'Position: ...' : `Next position: ${nextPosition}`}
+              </p>
+            )}
+          </div>
         </CardContent>
       </Card>
 
@@ -98,7 +135,7 @@ export function ScanView({ isConfigured }: ScanViewProps) {
             size="lg"
             className="w-full"
             variant='outline'
-            disabled={!state.currentTag.trim()}
+            disabled={!label.trim()}
           >
             Start Scanning
           </Button>
@@ -138,9 +175,9 @@ export function ScanView({ isConfigured }: ScanViewProps) {
           </Card>
         )}
 
-        {!state.currentTag.trim() && (
+        {!label.trim() && (
           <p className="text-sm text-center text-muted-foreground">
-            Enter a location tag to start scanning
+            Enter a location label to start scanning
           </p>
         )}
       </div>
