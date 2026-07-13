@@ -8,6 +8,41 @@ interface QRScannerProps {
   scanning?: boolean
 }
 
+// focusMode and zoom aren't in the standard MediaTrackCapabilities typings yet
+type CameraCapabilities = {
+  focusMode?: string[]
+  zoom?: { min?: number; max?: number }
+}
+
+/**
+ * Best-effort camera tuning: continuous autofocus and a modest zoom so QR
+ * codes can fill the frame from a comfortable distance (inside the lens's
+ * focus range). No-ops on browsers/cameras without these capabilities.
+ */
+async function applyCameraEnhancements(video: HTMLVideoElement): Promise<void> {
+  const stream = video.srcObject as MediaStream | null
+  const track = stream?.getVideoTracks()[0]
+  if (!track?.getCapabilities) return
+
+  const capabilities = track.getCapabilities() as CameraCapabilities
+  const advanced: Record<string, unknown>[] = []
+
+  if (capabilities.focusMode?.includes('continuous')) {
+    advanced.push({ focusMode: 'continuous' })
+  }
+  if (capabilities.zoom?.max !== undefined && capabilities.zoom.max > 1) {
+    advanced.push({ zoom: Math.min(2, capabilities.zoom.max) })
+  }
+
+  if (advanced.length > 0) {
+    try {
+      await track.applyConstraints({ advanced } as MediaTrackConstraints)
+    } catch {
+      // Camera rejected the tuning; default behavior is still fine
+    }
+  }
+}
+
 export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [hasPermission, setHasPermission] = useState<boolean | null>(null)
@@ -33,6 +68,7 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
 
     // Create abort controller for this scan session
     abortControllerRef.current = new AbortController()
+    let enhanceTimer: number | undefined
 
     try {
       // Create reader if it doesn't exist
@@ -42,27 +78,37 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
 
       const reader = readerRef.current
 
-      // Get available cameras
-      const videoInputDevices = await BrowserQRCodeReader.listVideoInputDevices()
-
-      if (videoInputDevices.length === 0) {
-        throw new Error('No camera found on this device')
-      }
-
-      // Prefer back camera on mobile devices
-      const backCamera = videoInputDevices.find((device: MediaDeviceInfo) =>
-        device.label.toLowerCase().includes('back')
-      )
-      const selectedDeviceId = backCamera?.deviceId || videoInputDevices[0].deviceId
-
       setIsScanning(true)
       setHasPermission(true)
 
+      // Let the OS pick the main rear camera (best autofocus) instead of
+      // enumerating devices ourselves: label-matching "back" often lands on
+      // an ultra-wide lens, and labels are empty before permission is granted.
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+      }
+
       // Scan once and automatically stop
-      const result = await reader.decodeOnceFromVideoDevice(
-        selectedDeviceId,
+      const decodePromise = reader.decodeOnceFromConstraints(
+        constraints,
         videoRef.current
       )
+
+      // Once the stream is attached, opt into continuous autofocus and a
+      // modest zoom where supported (Android Chrome); browsers that don't
+      // support these capabilities simply ignore them.
+      enhanceTimer = window.setInterval(() => {
+        if (videoRef.current?.srcObject) {
+          window.clearInterval(enhanceTimer)
+          applyCameraEnhancements(videoRef.current)
+        }
+      }, 250)
+
+      const result = await decodePromise
 
       // Check if scan was aborted
       if (abortControllerRef.current?.signal.aborted) {
@@ -84,6 +130,10 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
 
       if (onError && error instanceof Error) {
         onError(error)
+      }
+    } finally {
+      if (enhanceTimer !== undefined) {
+        window.clearInterval(enhanceTimer)
       }
     }
   }
