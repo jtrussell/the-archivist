@@ -3,11 +3,15 @@ import { Button } from './ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card'
 import { getUnsyncedCount, syncQueue } from '../services/syncService'
 import { clearScanQueue, clearAppState } from '../services/storage'
+import { exportScansCsv, deleteAccount } from '../services/scanService'
+import { supabase } from '../lib/supabase'
 import { useAuth } from '../hooks/useAuth'
 
 export function SettingsView() {
   const { session, signOut } = useAuth()
   const [loading, setLoading] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [unsyncedCount, setUnsyncedCount] = useState(0)
 
@@ -38,6 +42,53 @@ export function SettingsView() {
       clearScanQueue()
       setUnsyncedCount(0)
       setError(null)
+    }
+  }
+
+  const handleExport = async () => {
+    setExporting(true)
+    setError(null)
+
+    try {
+      const csv = await exportScansCsv()
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `archivist-scans-${new Date().toISOString().slice(0, 10)}.csv`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Export failed')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const handleDeleteAccount = async () => {
+    const confirmed = confirm(
+      'Delete your account and ALL scan data? This cannot be undone. ' +
+      'Consider exporting a CSV backup first.'
+    )
+    if (!confirmed) return
+
+    const doubleChecked = confirm(
+      'Last chance: this permanently deletes every scan and label ' +
+      'in your account. Continue?'
+    )
+    if (!doubleChecked) return
+
+    setDeleting(true)
+    setError(null)
+
+    try {
+      await deleteAccount()
+      clearAppState()
+      // The server-side user is gone; clear the local session only
+      await supabase.auth.signOut({ scope: 'local' })
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Account deletion failed')
+      setDeleting(false)
     }
   }
 
@@ -99,6 +150,20 @@ export function SettingsView() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Export</CardTitle>
+          <CardDescription>
+            Download your full scan history as a CSV file
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={handleExport} disabled={exporting} variant="outline" className="w-full">
+            {exporting ? 'Exporting...' : 'Export All Scans (CSV)'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>How It Works</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-muted-foreground">
@@ -115,6 +180,27 @@ export function SettingsView() {
           <p>
             4. Use Search to find a deck's current location and position by name
           </p>
+        </CardContent>
+      </Card>
+
+      <Card className="border-destructive">
+        <CardHeader>
+          <CardTitle>Danger Zone</CardTitle>
+          <CardDescription>
+            Permanently delete your account, including every scan and label.
+            This cannot be undone — export a CSV backup first if you want to
+            keep your data.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            onClick={handleDeleteAccount}
+            disabled={deleting}
+            variant="destructive"
+            className="w-full"
+          >
+            {deleting ? 'Deleting...' : 'Delete Account & All Data'}
+          </Button>
         </CardContent>
       </Card>
 

@@ -115,7 +115,7 @@ export function ScanView() {
             placeholder="e.g., Storage Box #3457"
             className="text-lg"
           />
-          <div className="flex justify-between items-center mt-2">
+          <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-center mt-2">
             <p className="text-sm text-muted-foreground">
               Pick a previous label or type a new one
             </p>

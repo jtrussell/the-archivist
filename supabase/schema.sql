@@ -68,6 +68,22 @@ end $$;
 
 revoke execute on function public.record_scan from anon;
 
+-- Delete the calling user's account and all their data. security definer so it
+-- can remove the auth.users row; labels/scans cascade from the FK. Irreversible.
+create or replace function public.delete_account()
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+  delete from auth.users where id = auth.uid();
+end $$;
+
+revoke execute on function public.delete_account from anon, public;
+grant execute on function public.delete_account to authenticated;
+
 -- Current location per deck (most recent scan wins); security_invoker so RLS applies.
 create or replace view public.current_deck_locations
 with (security_invoker = true) as

@@ -78,7 +78,7 @@ const Combobox = React.forwardRef<HTMLInputElement, ComboboxProps>(
           autoComplete="off"
         />
         {open && filtered.length > 0 && (
-          <ul className="absolute z-10 mt-1 w-full max-h-60 overflow-auto rounded-md border border-input bg-background shadow-md">
+          <ul className="absolute z-50 mt-1 w-full max-h-60 overflow-auto rounded-md border border-input bg-popover text-popover-foreground shadow-lg">
             {filtered.map((option, i) => (
               <li key={option}>
                 <button

@@ -83,6 +83,50 @@ export async function getMaxPosition(label: string): Promise<number> {
 }
 
 /**
+ * Export every scan (full history) as a flat CSV string
+ */
+export async function exportScansCsv(): Promise<string> {
+  const { data, error } = await supabase
+    .from('scans')
+    .select('scanned_at, deck_id, deck_code, deck_uuid, deck_name, position, labels(name)')
+    .order('scanned_at', { ascending: true })
+
+  if (error) throw new Error(`Export failed: ${error.message}`)
+
+  const escape = (value: string | number | null): string => {
+    if (value === null || value === undefined) return ''
+    const str = String(value)
+    return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str
+  }
+
+  const header = 'scanned_at,label,position,deck_name,deck_id,deck_code,deck_uuid'
+  const rows = (data ?? []).map((row) => {
+    // labels(name) is a many-to-one join: supabase-js types it loosely
+    const label = (row.labels as unknown as { name: string } | null)?.name ?? ''
+    return [
+      row.scanned_at,
+      label,
+      row.position,
+      row.deck_name,
+      row.deck_id,
+      row.deck_code,
+      row.deck_uuid,
+    ].map(escape).join(',')
+  })
+
+  return [header, ...rows].join('\r\n')
+}
+
+/**
+ * Delete the current user's account and all their data (via the
+ * delete_account database function). Irreversible.
+ */
+export async function deleteAccount(): Promise<void> {
+  const { error } = await supabase.rpc('delete_account')
+  if (error) throw new Error(`Account deletion failed: ${error.message}`)
+}
+
+/**
  * Search decks by name; returns each deck's most recent location
  */
 export async function searchDecks(query: string): Promise<DeckLocation[]> {
