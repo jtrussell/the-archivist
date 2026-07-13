@@ -33,12 +33,14 @@ You need a free Supabase project and a Google OAuth client.
 3. Under **Auth → URL Configuration**:
    - Site URL: `https://<your-username>.github.io/the-archivist/`
    - Redirect URLs: `https://<your-username>.github.io/the-archivist/**` and `http://localhost:5173/**`
-4. Copy the Project URL and anon key (**Settings → API**) into `.env`:
+4. Copy the Project URL and **publishable key** (`sb_publishable_...`, under **Settings → API Keys**) into `.env`:
    ```
    VITE_SUPABASE_URL=https://your-project-ref.supabase.co
-   VITE_SUPABASE_ANON_KEY=your-anon-key
+   VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your-key
    ```
    These values are public by design; Row Level Security protects the data.
+   (Don't use the legacy anon key — it's deprecated — and never use the
+   secret or service-role key in this app.)
 
 ### 2. Google OAuth (for Supabase Auth)
 
