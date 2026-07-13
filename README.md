@@ -16,7 +16,7 @@ A minimal-footprint web application for tracking KeyForge deck locations by scan
 
 ## Quick Start
 
-1. Visit the deployed app: `https://jtrussell.github.io/the-archivist/`
+1. Visit the deployed app: `https://jtrussell.me/the-archivist/`
 2. Sign in with Google
 3. Pick or create a location label
 4. Start scanning — each deck is stored with the next position in that label
