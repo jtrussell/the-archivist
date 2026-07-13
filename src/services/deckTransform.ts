@@ -1,8 +1,9 @@
 /**
  * Parse KeyForge QR data and look up deck names from the Master Vault API.
  *
- * QR codes come in two forms:
+ * QR codes come in three forms:
  *  - URL:  https://www.keyforgegame.com/deck-details/{uuid}
+ *  - URL (earlier printings): https://www.keyforgegame.com/deck/{code}
  *  - Code: 4Q958-HX64G-JH6P9
  */
 
@@ -15,6 +16,7 @@ export interface ParsedDeck {
 }
 
 const DECK_URL_PATTERN = /keyforgegame\.com\/deck-details\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
+const DECK_CODE_URL_PATTERN = /keyforgegame\.com\/deck\/([A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5})/i
 const DECK_CODE_PATTERN = /^[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/
 
 const API_BASE = 'https://www.keyforgegame.com/api'
@@ -31,6 +33,12 @@ export function parseQrData(qrData: string): Omit<ParsedDeck, 'deckName'> {
   if (urlMatch) {
     const uuid = urlMatch[1].toLowerCase()
     return { deckId: uuid, deckCode: null, deckUuid: uuid }
+  }
+
+  const codeUrlMatch = trimmed.match(DECK_CODE_URL_PATTERN)
+  if (codeUrlMatch) {
+    const code = codeUrlMatch[1].toUpperCase()
+    return { deckId: code, deckCode: code, deckUuid: null }
   }
 
   const code = trimmed.toUpperCase()
