@@ -3,6 +3,7 @@
  */
 
 import { supabase } from '../lib/supabase'
+import { fetchDeckName } from './deckTransform'
 
 export interface RecordedScan {
   scanId: string
@@ -80,6 +81,82 @@ export async function getMaxPosition(label: string): Promise<number> {
 
   if (error) throw new Error(`Failed to load position: ${error.message}`)
   return data?.[0]?.position ?? 0
+}
+
+/**
+ * Count scans whose deck name lookup failed (candidates for backfill)
+ */
+export async function countNamelessScans(): Promise<number> {
+  const { count, error } = await supabase
+    .from('scans')
+    .select('id', { count: 'exact', head: true })
+    .is('deck_name', null)
+
+  if (error) throw new Error(`Failed to count nameless scans: ${error.message}`)
+  return count ?? 0
+}
+
+export interface BackfillResult {
+  /** Scan rows that received a name */
+  updated: number
+  /** Scan rows still nameless (lookups failed again) */
+  remaining: number
+}
+
+/**
+ * Self-heal nameless scans: refetch each missing deck name from the Master
+ * Vault API (one request per unique deck, politely throttled) and update all
+ * of that deck's rows in one query. Safe to re-run; picks up where it left off.
+ */
+export async function backfillDeckNames(
+  onProgress?: (done: number, total: number) => void
+): Promise<BackfillResult> {
+  const { data, error } = await supabase
+    .from('scans')
+    .select('deck_id, deck_code, deck_uuid')
+    .is('deck_name', null)
+
+  if (error) throw new Error(`Failed to load nameless scans: ${error.message}`)
+
+  // Many rows can share a deck; fetch each unique deck's name only once
+  const uniqueDecks = new Map<string, { deckCode: string | null; deckUuid: string | null }>()
+  for (const row of data ?? []) {
+    if (!uniqueDecks.has(row.deck_id)) {
+      uniqueDecks.set(row.deck_id, { deckCode: row.deck_code, deckUuid: row.deck_uuid })
+    }
+  }
+
+  let updated = 0
+  let remaining = (data ?? []).length
+  let done = 0
+
+  for (const [deckId, deck] of uniqueDecks) {
+    const name = await fetchDeckName(deck)
+
+    if (name !== null) {
+      const { count, error: updateError } = await supabase
+        .from('scans')
+        .update({ deck_name: name }, { count: 'exact' })
+        .eq('deck_id', deckId)
+        .is('deck_name', null)
+
+      if (updateError) {
+        throw new Error(`Failed to update deck name: ${updateError.message}`)
+      }
+      updated += count ?? 0
+      remaining -= count ?? 0
+    }
+
+    done++
+    onProgress?.(done, uniqueDecks.size)
+
+    // Be polite to the API between lookups
+    if (done < uniqueDecks.size) {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    }
+  }
+
+  return { updated, remaining }
 }
 
 /**

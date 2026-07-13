@@ -61,7 +61,10 @@ export function ScanView() {
 
       if (result.success && result.position !== undefined) {
         setStatus('success')
-        setMessage(`Stored as #${result.position} in ${label.trim()}`)
+        const name = result.deckName
+          ? `"${result.deckName}"`
+          : 'Deck (name lookup failed — backfill later in Settings)'
+        setMessage(`${name} stored as #${result.position} in ${label.trim()}`)
         setMaxPosition(result.position)
         if (!labels.includes(label.trim())) {
           setLabels([label.trim(), ...labels])

@@ -3,7 +3,12 @@ import { Button } from './ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card'
 import { getUnsyncedCount, syncQueue } from '../services/syncService'
 import { clearScanQueue, clearAppState } from '../services/storage'
-import { exportScansCsv, deleteAccount } from '../services/scanService'
+import {
+  exportScansCsv,
+  deleteAccount,
+  countNamelessScans,
+  backfillDeckNames,
+} from '../services/scanService'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../hooks/useAuth'
 
@@ -14,9 +19,16 @@ export function SettingsView() {
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [unsyncedCount, setUnsyncedCount] = useState(0)
+  const [namelessCount, setNamelessCount] = useState(0)
+  const [backfilling, setBackfilling] = useState(false)
+  const [backfillProgress, setBackfillProgress] = useState('')
+  const [backfillMessage, setBackfillMessage] = useState<string | null>(null)
 
   useEffect(() => {
     setUnsyncedCount(getUnsyncedCount())
+    countNamelessScans()
+      .then(setNamelessCount)
+      .catch((error) => console.error('Failed to count nameless scans:', error))
   }, [])
 
   const handleSync = async () => {
@@ -42,6 +54,31 @@ export function SettingsView() {
       clearScanQueue()
       setUnsyncedCount(0)
       setError(null)
+    }
+  }
+
+  const handleBackfill = async () => {
+    setBackfilling(true)
+    setBackfillMessage(null)
+    setError(null)
+
+    try {
+      const result = await backfillDeckNames((done, total) => {
+        setBackfillProgress(`Looking up deck ${done} of ${total}...`)
+      })
+      const count = await countNamelessScans()
+      setNamelessCount(count)
+      setBackfillMessage(
+        result.remaining > 0
+          ? `Filled in ${result.updated} scan${result.updated !== 1 ? 's' : ''}; ` +
+            `${result.remaining} still missing (try again later)`
+          : `Filled in names for ${result.updated} scan${result.updated !== 1 ? 's' : ''}`
+      )
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Backfill failed')
+    } finally {
+      setBackfilling(false)
+      setBackfillProgress('')
     }
   }
 
@@ -147,6 +184,37 @@ export function SettingsView() {
           </Button>
         </CardContent>
       </Card>
+
+      {(namelessCount > 0 || backfillMessage) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Missing Deck Names</CardTitle>
+            <CardDescription>
+              {namelessCount > 0
+                ? `${namelessCount} scan${namelessCount !== 1 ? 's are' : ' is'} missing a deck ` +
+                  'name (the lookup failed at scan time). Names are needed for search.'
+                : 'All scans have deck names.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {namelessCount > 0 && (
+              <Button
+                onClick={handleBackfill}
+                disabled={backfilling}
+                variant="outline"
+                className="w-full"
+              >
+                {backfilling
+                  ? backfillProgress || 'Backfilling...'
+                  : 'Backfill Missing Names'}
+              </Button>
+            )}
+            {backfillMessage && (
+              <p className="text-sm text-center text-muted-foreground">{backfillMessage}</p>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

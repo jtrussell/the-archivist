@@ -18,6 +18,8 @@ export interface ScanResult {
   queued: boolean
   /** Position assigned by the database, when the scan synced immediately */
   position?: number
+  /** Deck name from the Master Vault lookup; null when the lookup failed */
+  deckName?: string | null
   error?: string
 }
 
@@ -53,11 +55,16 @@ export async function recordScan(
     if (navigator.onLine) {
       const result = await syncQueue()
       if (result.failed === 0 && result.lastPosition !== undefined) {
-        return { success: true, queued: false, position: result.lastPosition }
+        return {
+          success: true,
+          queued: false,
+          position: result.lastPosition,
+          deckName: deck.deckName,
+        }
       }
     }
 
-    return { success: true, queued: true }
+    return { success: true, queued: true, deckName: deck.deckName }
   } catch (error) {
     console.error('Failed to record scan:', error)
     return {

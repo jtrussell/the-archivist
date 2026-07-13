@@ -33,6 +33,8 @@ create policy "own labels insert" on public.labels for insert with check (user_i
 create policy "own labels update" on public.labels for update using (user_id = auth.uid());
 create policy "own scans select"  on public.scans  for select using (user_id = auth.uid());
 create policy "own scans insert"  on public.scans  for insert with check (user_id = auth.uid());
+create policy "own scans update"  on public.scans  for update
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- Atomic scan recording: the label upsert row-locks the label, serializing
 -- max(position)+1 per (user, label); returns the assigned position for the UI.
