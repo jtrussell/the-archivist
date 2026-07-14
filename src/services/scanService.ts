@@ -203,17 +203,66 @@ export async function deleteAccount(): Promise<void> {
   if (error) throw new Error(`Account deletion failed: ${error.message}`)
 }
 
+export const SEARCH_PAGE_SIZE = 12
+
+export interface DeckSearchPage {
+  decks: DeckLocation[]
+  /** Total decks (not scans) matching the query */
+  total: number
+}
+
 /**
- * Search decks by name; returns each deck's most recent location
+ * List decks (one row per deck: its most recent scan), newest-scanned first,
+ * optionally filtered by name. Paginated; also returns the total match count.
  */
-export async function searchDecks(query: string): Promise<DeckLocation[]> {
-  const { data, error } = await supabase
+export async function searchDecks(
+  query: string,
+  page: number,
+  pageSize: number = SEARCH_PAGE_SIZE
+): Promise<DeckSearchPage> {
+  let builder = supabase
     .from('current_deck_locations')
-    .select('scan_id, deck_id, deck_name, deck_code, deck_uuid, label, position, scanned_at')
-    .ilike('deck_name', `%${query}%`)
-    .order('deck_name')
-    .limit(50)
+    .select('scan_id, deck_id, deck_name, deck_code, deck_uuid, label, position, scanned_at', {
+      count: 'exact',
+    })
+
+  const trimmed = query.trim()
+  if (trimmed) {
+    builder = builder.ilike('deck_name', `%${trimmed}%`)
+  }
+
+  const from = page * pageSize
+  const { data, count, error } = await builder
+    .order('scanned_at', { ascending: false })
+    .range(from, from + pageSize - 1)
 
   if (error) throw new Error(`Search failed: ${error.message}`)
-  return data ?? []
+  return { decks: data ?? [], total: count ?? 0 }
+}
+
+export interface DeckScanRecord {
+  id: string
+  label: string
+  position: number
+  scanned_at: string
+}
+
+/**
+ * Full scan history for one deck, newest first
+ */
+export async function getDeckHistory(deckId: string): Promise<DeckScanRecord[]> {
+  const { data, error } = await supabase
+    .from('scans')
+    .select('id, position, scanned_at, labels(name)')
+    .eq('deck_id', deckId)
+    .order('scanned_at', { ascending: false })
+
+  if (error) throw new Error(`Failed to load scan history: ${error.message}`)
+
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    label: (row.labels as unknown as { name: string } | null)?.name ?? '',
+    position: row.position,
+    scanned_at: row.scanned_at,
+  }))
 }
