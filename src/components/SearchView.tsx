@@ -163,9 +163,6 @@ function DeckDetail({ deck, onBack }: { deck: DeckLocation; onBack: () => void }
           <p className="text-lg font-semibold break-words">
             {deck.deck_name ?? deck.deck_id}
           </p>
-          {deck.deck_code && (
-            <p className="text-sm font-mono text-muted-foreground mt-1">{deck.deck_code}</p>
-          )}
           <div className="mt-4 p-3 border rounded-md bg-muted">
             <p className="text-sm text-muted-foreground">Current location</p>
             <p className="font-medium">
