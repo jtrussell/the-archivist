@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { BrowserQRCodeReader } from '@zxing/browser'
+import type { IScannerControls } from '@zxing/browser'
 import { Button } from './ui/button'
 
 interface QRScannerProps {
   onScan: (data: string) => void
   onError?: (error: Error) => void
-  scanning?: boolean
 }
 
 // focusMode and zoom aren't in the standard MediaTrackCapabilities typings yet
@@ -43,123 +43,101 @@ async function applyCameraEnhancements(video: HTMLVideoElement): Promise<void> {
   }
 }
 
-export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) {
+/**
+ * Holds a single camera session open for its entire lifetime, decoding
+ * continuously and reporting every hit through onScan. Callers are
+ * responsible for debouncing/deduping results. Tearing down and re-acquiring
+ * the camera per scan is what we're avoiding: mobile browsers start
+ * returning black frames after a few dozen rapid getUserMedia cycles.
+ */
+export function QRScanner({ onScan, onError }: QRScannerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [hasPermission, setHasPermission] = useState<boolean | null>(null)
   const [isScanning, setIsScanning] = useState(false)
-  const readerRef = useRef<BrowserQRCodeReader | null>(null)
-  const abortControllerRef = useRef<AbortController | null>(null)
+  const [restartToken, setRestartToken] = useState(0)
+
+  // Keep latest callbacks available to the long-lived decode loop without
+  // restarting the camera session when they change identity.
+  const onScanRef = useRef(onScan)
+  onScanRef.current = onScan
+  const onErrorRef = useRef(onError)
+  onErrorRef.current = onError
 
   useEffect(() => {
-    if (!scanning) {
-      stopScanning()
-      return
-    }
+    const video = videoRef.current
+    if (!video) return
 
-    startScanning()
-
-    return () => {
-      stopScanning()
-    }
-  }, [scanning])
-
-  const startScanning = async () => {
-    if (!videoRef.current || isScanning) return
-
-    // Create abort controller for this scan session
-    abortControllerRef.current = new AbortController()
+    let cancelled = false
+    let controls: IScannerControls | null = null
     let enhanceTimer: number | undefined
 
-    try {
-      // Create reader if it doesn't exist
-      if (!readerRef.current) {
-        readerRef.current = new BrowserQRCodeReader()
-      }
+    const reader = new BrowserQRCodeReader()
 
-      const reader = readerRef.current
+    // Let the OS pick the main rear camera (best autofocus) instead of
+    // enumerating devices ourselves: label-matching "back" often lands on
+    // an ultra-wide lens, and labels are empty before permission is granted.
+    const constraints: MediaStreamConstraints = {
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
+    }
 
-      setIsScanning(true)
-      setHasPermission(true)
-
-      // Let the OS pick the main rear camera (best autofocus) instead of
-      // enumerating devices ourselves: label-matching "back" often lands on
-      // an ultra-wide lens, and labels are empty before permission is granted.
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-      }
-
-      // Scan once and automatically stop
-      const decodePromise = reader.decodeOnceFromConstraints(
-        constraints,
-        videoRef.current
-      )
-
-      // Once the stream is attached, opt into continuous autofocus and a
-      // modest zoom where supported (Android Chrome); browsers that don't
-      // support these capabilities simply ignore them.
-      enhanceTimer = window.setInterval(() => {
-        if (videoRef.current?.srcObject) {
-          window.clearInterval(enhanceTimer)
-          applyCameraEnhancements(videoRef.current)
+    reader
+      .decodeFromConstraints(constraints, video, (result) => {
+        if (result && !cancelled) {
+          onScanRef.current(result.getText())
         }
-      }, 250)
+      })
+      .then((scannerControls) => {
+        if (cancelled) {
+          // Unmounted while the camera was still starting; release it so the
+          // stream doesn't outlive the component.
+          scannerControls.stop()
+          return
+        }
 
-      const result = await decodePromise
+        controls = scannerControls
+        setIsScanning(true)
+        setHasPermission(true)
 
-      // Check if scan was aborted
-      if (abortControllerRef.current?.signal.aborted) {
-        return
-      }
+        // Once the stream is attached, opt into continuous autofocus and a
+        // modest zoom where supported (Android Chrome); browsers that don't
+        // support these capabilities simply ignore them.
+        enhanceTimer = window.setInterval(() => {
+          if (video.srcObject) {
+            window.clearInterval(enhanceTimer)
+            applyCameraEnhancements(video)
+          }
+        }, 250)
+      })
+      .catch((error) => {
+        if (cancelled) return
 
-      const text = result.getText()
-      onScan(text)
+        console.error('Failed to start camera:', error)
+        setHasPermission(false)
+        setIsScanning(false)
 
-    } catch (error) {
-      // Ignore errors from aborted scans
-      if (abortControllerRef.current?.signal.aborted) {
-        return
-      }
+        if (onErrorRef.current && error instanceof Error) {
+          onErrorRef.current(error)
+        }
+      })
 
-      console.error('Failed to scan:', error)
-      setHasPermission(false)
-      setIsScanning(false)
-
-      if (onError && error instanceof Error) {
-        onError(error)
-      }
-    } finally {
+    return () => {
+      cancelled = true
       if (enhanceTimer !== undefined) {
         window.clearInterval(enhanceTimer)
       }
+      // Stops the decode loop, the stream's tracks, and detaches the video
+      controls?.stop()
+      setIsScanning(false)
     }
-  }
+  }, [restartToken])
 
-  const stopScanning = () => {
-    // Abort any ongoing scan
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort()
-      abortControllerRef.current = null
-    }
-
-    // Stop video stream
-    if (videoRef.current) {
-      const stream = videoRef.current.srcObject as MediaStream | null
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop())
-      }
-      videoRef.current.srcObject = null
-    }
-
-    setIsScanning(false)
-  }
-
-  const requestPermission = async () => {
+  const requestPermission = () => {
     setHasPermission(null)
-    await startScanning()
+    setRestartToken((token) => token + 1)
   }
 
   if (hasPermission === false) {
@@ -184,7 +162,7 @@ export function QRScanner({ onScan, onError, scanning = true }: QRScannerProps) 
         muted
       />
 
-      {!isScanning && (hasPermission === null || hasPermission === true) && (
+      {!isScanning && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-lg">
           <div className="text-white text-center">
             <p>Initializing camera...</p>

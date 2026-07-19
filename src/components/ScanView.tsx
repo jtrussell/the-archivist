@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { QRScanner } from './QRScanner'
 import { Button } from './ui/button'
 import { Combobox } from './ui/combobox'
@@ -12,6 +12,10 @@ function countQueuedForLabel(label: string): number {
   return getUnsyncedQueueItems().filter((item) => item.label === label).length
 }
 
+// A code sitting in the viewfinder re-decodes every ~500ms; ignore repeats of
+// the same code until it's been out of frame this long.
+const SAME_CODE_COOLDOWN_MS = 3000
+
 export function ScanView() {
   const { state, updateState } = useAppState()
   const [scanning, setScanning] = useState(false)
@@ -19,6 +23,11 @@ export function ScanView() {
   const [message, setMessage] = useState('')
   const [labels, setLabels] = useState<string[]>([])
   const [maxPosition, setMaxPosition] = useState<number | null>(null)
+
+  // The camera session stays open across scans; these gate the continuous
+  // stream of decode results instead of tearing the camera down per deck.
+  const processingRef = useRef(false)
+  const lastScanRef = useRef<{ text: string; at: number } | null>(null)
 
   const label = state.currentLabel
 
@@ -53,8 +62,20 @@ export function ScanView() {
     maxPosition === null ? null : maxPosition + countQueuedForLabel(label.trim()) + 1
 
   const handleScan = async (qrData: string) => {
-    // Temporarily stop scanning while processing
-    setScanning(false)
+    // Already handling a scan; the camera keeps running, just ignore hits
+    if (processingRef.current) return
+
+    // Same deck still sitting in the viewfinder — refresh the window so it
+    // isn't recorded again until it's been out of frame for a while
+    const now = Date.now()
+    const last = lastScanRef.current
+    if (last && last.text === qrData && now - last.at < SAME_CODE_COOLDOWN_MS) {
+      last.at = now
+      return
+    }
+
+    processingRef.current = true
+    lastScanRef.current = { text: qrData, at: now }
 
     try {
       const result = await recordScan(qrData, label.trim())
@@ -79,22 +100,24 @@ export function ScanView() {
       } else {
         setStatus('error')
         setMessage(result.error || 'Failed to record scan')
+        // Allow an immediate retry of the same deck after a failure
+        lastScanRef.current = null
       }
 
-      // Automatically restart scanning for next deck
+      // Brief cooldown before accepting the next deck
       setTimeout(() => {
-        setScanning(true)
         setStatus('idle')
+        processingRef.current = false
       }, 1000)
 
     } catch (error) {
       setStatus('error')
       setMessage(error instanceof Error ? error.message : 'Unknown error')
+      lastScanRef.current = null
 
-      // Restart scanning after error
       setTimeout(() => {
-        setScanning(true)
         setStatus('idle')
+        processingRef.current = false
       }, 2000)
     }
   }
@@ -147,11 +170,15 @@ export function ScanView() {
             <QRScanner
               onScan={handleScan}
               onError={handleError}
-              scanning={scanning}
             />
 
             <Button
-              onClick={() => setScanning(false)}
+              onClick={() => {
+                setScanning(false)
+                setStatus('idle')
+                processingRef.current = false
+                lastScanRef.current = null
+              }}
               variant="outline"
               className="w-full"
             >
