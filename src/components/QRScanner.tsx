@@ -3,9 +3,19 @@ import { BrowserQRCodeReader } from '@zxing/browser'
 import type { IScannerControls } from '@zxing/browser'
 import { Button } from './ui/button'
 
+export type ScanFeedback = 'success' | 'error' | 'queued'
+
 interface QRScannerProps {
   onScan: (data: string) => void
   onError?: (error: Error) => void
+  /** Flashes a colored confirmation overlay on the viewfinder while set */
+  feedback?: ScanFeedback | null
+}
+
+const feedbackStyles: Record<ScanFeedback, string> = {
+  success: 'bg-green-500',
+  queued: 'bg-yellow-500',
+  error: 'bg-red-500',
 }
 
 // focusMode and zoom aren't in the standard MediaTrackCapabilities typings yet
@@ -50,7 +60,7 @@ async function applyCameraEnhancements(video: HTMLVideoElement): Promise<void> {
  * the camera per scan is what we're avoiding: mobile browsers start
  * returning black frames after a few dozen rapid getUserMedia cycles.
  */
-export function QRScanner({ onScan, onError }: QRScannerProps) {
+export function QRScanner({ onScan, onError, feedback = null }: QRScannerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [hasPermission, setHasPermission] = useState<boolean | null>(null)
   const [isScanning, setIsScanning] = useState(false)
@@ -178,6 +188,31 @@ export function QRScanner({ onScan, onError }: QRScannerProps) {
             <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-primary -translate-x-1 translate-y-1" />
             <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-primary translate-x-1 translate-y-1" />
           </div>
+        </div>
+      )}
+
+      {feedback && (
+        <div
+          className={`absolute inset-0 flex items-center justify-center rounded-lg pointer-events-none animate-scan-flash ${feedbackStyles[feedback]}`}
+        >
+          <svg
+            className="w-24 h-24 text-white drop-shadow-lg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            {feedback === 'error' ? (
+              <>
+                <line x1="6" y1="6" x2="18" y2="18" />
+                <line x1="18" y1="6" x2="6" y2="18" />
+              </>
+            ) : (
+              <polyline points="4 12.5 10 18.5 20 6.5" />
+            )}
+          </svg>
         </div>
       )}
     </div>

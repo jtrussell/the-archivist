@@ -170,6 +170,7 @@ export function ScanView() {
             <QRScanner
               onScan={handleScan}
               onError={handleError}
+              feedback={status === 'idle' ? null : status}
             />
 
             <Button
