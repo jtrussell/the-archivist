@@ -17,6 +17,8 @@ create table public.scans (
   deck_code  text,                 -- e.g. 4Q958-HX64G-JH6P9 (when scanned as code)
   deck_uuid  uuid,                 -- keyforgegame.com master-vault uuid (when scanned as URL)
   deck_name  text,                 -- nullable; name fetch may fail offline
+  mv_id      uuid,                 -- master-vault deck id (differs from the scanned QR id); looked up lazily by name
+  set_id     integer,              -- master-vault expansion set id
   position   integer not null,     -- per-user, per-label incrementing counter
   scanned_at timestamptz not null, -- client-side time of scan (accurate for offline scans)
   created_at timestamptz not null default now()
@@ -91,6 +93,7 @@ create or replace view public.current_deck_locations
 with (security_invoker = true) as
 select distinct on (s.user_id, s.deck_id)
   s.id as scan_id, s.user_id, s.deck_id, s.deck_name, s.deck_code, s.deck_uuid,
+  s.mv_id, s.set_id,
   l.name as label, s.position, s.scanned_at, s.created_at
 from public.scans s
 join public.labels l on l.id = s.label_id

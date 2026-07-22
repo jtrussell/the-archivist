@@ -3,7 +3,7 @@
  */
 
 import { supabase } from '../lib/supabase'
-import { fetchDeckName } from './deckTransform'
+import { fetchDeckName, fetchDeckMasterVaultInfo, MasterVaultDeckInfo } from './deckTransform'
 
 export interface RecordedScan {
   scanId: string
@@ -17,6 +17,8 @@ export interface DeckLocation {
   deck_name: string | null
   deck_code: string | null
   deck_uuid: string | null
+  mv_id: string | null
+  set_id: number | null
   label: string
   position: number
   scanned_at: string
@@ -159,6 +161,42 @@ export async function backfillDeckNames(
   return { updated, remaining }
 }
 
+export async function backfillSingleDeckName(deck: {
+  deck_id: string
+  deck_code: string | null
+  deck_uuid: string | null
+}): Promise<string | null> {
+  const name = await fetchDeckName({ deckCode: deck.deck_code, deckUuid: deck.deck_uuid })
+  if (name === null) return null
+
+  const { error } = await supabase
+    .from('scans')
+    .update({ deck_name: name })
+    .eq('deck_id', deck.deck_id)
+    .or(`deck_name.is.null,deck_name.eq.${deck.deck_id}`)
+
+  if (error) throw new Error(`Failed to update deck name: ${error.message}`)
+  return name
+}
+
+export async function backfillDeckMasterVaultInfo(deck: {
+  deck_id: string
+  deck_name: string | null
+}): Promise<MasterVaultDeckInfo | null> {
+  if (deck.deck_name === null) return null
+
+  const info = await fetchDeckMasterVaultInfo(deck.deck_name)
+  if (info === null) return null
+
+  const { error } = await supabase
+    .from('scans')
+    .update({ mv_id: info.mvId, set_id: info.setId })
+    .eq('deck_id', deck.deck_id)
+
+  if (error) throw new Error(`Failed to save Master Vault info: ${error.message}`)
+  return info
+}
+
 /**
  * Export every scan (full history) as a flat CSV string
  */
@@ -218,17 +256,24 @@ export interface DeckSearchPage {
 export async function searchDecks(
   query: string,
   page: number,
-  pageSize: number = SEARCH_PAGE_SIZE
+  options: { missingNamesOnly?: boolean; pageSize?: number } = {}
 ): Promise<DeckSearchPage> {
+  const { missingNamesOnly = false, pageSize = SEARCH_PAGE_SIZE } = options
+
   let builder = supabase
     .from('current_deck_locations')
-    .select('scan_id, deck_id, deck_name, deck_code, deck_uuid, label, position, scanned_at', {
-      count: 'exact',
-    })
+    .select(
+      'scan_id, deck_id, deck_name, deck_code, deck_uuid, mv_id, set_id, label, position, scanned_at',
+      { count: 'exact' }
+    )
+
+  if (missingNamesOnly) {
+    builder = builder.is('deck_name', null)
+  }
 
   const trimmed = query.trim()
   if (trimmed) {
-    builder = builder.ilike('deck_name', `%${trimmed}%`)
+    builder = builder.ilike(missingNamesOnly ? 'deck_id' : 'deck_name', `%${trimmed}%`)
   }
 
   const from = page * pageSize

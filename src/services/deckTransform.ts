@@ -74,6 +74,44 @@ export async function fetchDeckName(
   }
 }
 
+export interface MasterVaultDeckInfo {
+  mvId: string
+  setId: number | null
+}
+
+const EXPLORE_SEARCH_TIMEOUT_MS = 10000
+
+export async function fetchDeckMasterVaultInfo(
+  deckName: string
+): Promise<MasterVaultDeckInfo | null> {
+  const params = new URLSearchParams({ page: '1', page_size: '10', search: deckName })
+
+  try {
+    const response = await fetch(`${API_BASE}/decks/explore/?${params}`, {
+      signal: AbortSignal.timeout(EXPLORE_SEARCH_TIMEOUT_MS),
+    })
+    if (!response.ok) return null
+
+    const json = await response.json()
+    const candidates: { id?: unknown; name?: unknown; expansion?: { set_id?: unknown } }[] =
+      Array.isArray(json?.data) ? json.data : []
+
+    const wantedName = deckName.trim().toLowerCase()
+    const match = candidates.find(
+      (candidate) =>
+        typeof candidate.name === 'string' && candidate.name.trim().toLowerCase() === wantedName
+    )
+    if (!match || typeof match.id !== 'string' || match.id.length === 0) return null
+
+    return {
+      mvId: match.id,
+      setId: typeof match.expansion?.set_id === 'number' ? match.expansion.set_id : null,
+    }
+  } catch {
+    return null
+  }
+}
+
 /**
  * Parse QR data and enrich with the deck name (best-effort).
  */
