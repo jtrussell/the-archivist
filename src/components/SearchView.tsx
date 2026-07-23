@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Input } from './ui/input'
 import { Button } from './ui/button'
 import { Card, CardContent } from './ui/card'
+import { DeckNoteCard } from './DeckNoteCard'
 import {
   searchDecks,
   getDeckHistory,
@@ -345,6 +346,8 @@ function DeckDetail({
           </div>
         </CardContent>
       </Card>
+
+      <DeckNoteCard deckId={deck.deck_id} />
 
       <div>
         <h2 className="text-sm font-medium mb-3">Scan History</h2>

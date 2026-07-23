@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 /* Register the shadcn-style tokens as Tailwind v4 theme colors so utilities
    like bg-background / bg-popover / text-muted-foreground are generated.

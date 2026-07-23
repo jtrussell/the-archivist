@@ -24,6 +24,37 @@ const STORAGE_KEYS = {
   SCAN_QUEUE: 'archivist_scan_queue_v2',
 } as const
 
+const NOTE_DRAFT_KEY_PREFIX = 'archivist_note_draft_v1'
+
+function noteDraftKey(userId: string, deckId: string): string {
+  return `${NOTE_DRAFT_KEY_PREFIX}:${userId}:${deckId}`
+}
+
+export function getNoteDraft(userId: string, deckId: string): string | null {
+  try {
+    return localStorage.getItem(noteDraftKey(userId, deckId))
+  } catch (error) {
+    console.error('Error reading note draft from localStorage:', error)
+    return null
+  }
+}
+
+export function saveNoteDraft(userId: string, deckId: string, content: string): void {
+  try {
+    localStorage.setItem(noteDraftKey(userId, deckId), content)
+  } catch (error) {
+    console.error('Error saving note draft to localStorage:', error)
+  }
+}
+
+export function clearNoteDraft(userId: string, deckId: string): void {
+  try {
+    localStorage.removeItem(noteDraftKey(userId, deckId))
+  } catch (error) {
+    console.error('Error clearing note draft from localStorage:', error)
+  }
+}
+
 const DEFAULT_APP_STATE: AppState = {
   currentLabel: '',
   lastSyncTime: null,

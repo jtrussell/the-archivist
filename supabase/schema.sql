@@ -27,8 +27,19 @@ create table public.scans (
 create index scans_label_position_idx on public.scans (label_id, position desc);
 create index scans_user_deck_recent_idx on public.scans (user_id, deck_id, created_at desc);
 
+create table public.deck_notes (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  deck_id    text not null,
+  content    text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, deck_id)
+);
+
 alter table public.labels enable row level security;
 alter table public.scans  enable row level security;
+alter table public.deck_notes enable row level security;
 
 create policy "own labels select" on public.labels for select using (user_id = auth.uid());
 create policy "own labels insert" on public.labels for insert with check (user_id = auth.uid());
@@ -37,6 +48,11 @@ create policy "own scans select"  on public.scans  for select using (user_id = a
 create policy "own scans insert"  on public.scans  for insert with check (user_id = auth.uid());
 create policy "own scans update"  on public.scans  for update
   using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "own notes select" on public.deck_notes for select using (user_id = auth.uid());
+create policy "own notes insert" on public.deck_notes for insert with check (user_id = auth.uid());
+create policy "own notes update" on public.deck_notes for update
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "own notes delete" on public.deck_notes for delete using (user_id = auth.uid());
 
 -- Atomic scan recording: the label upsert row-locks the label, serializing
 -- max(position)+1 per (user, label); returns the assigned position for the UI.
