@@ -285,6 +285,36 @@ export async function searchDecks(
   return { decks: data ?? [], total: count ?? 0 }
 }
 
+/**
+ * Resolve a scan row id to its deck's current location.
+ *
+ * The URL only ever carries an opaque scan id (a random uuid), never the
+ * scanned deck codes. We look up which deck that scan belongs to, then return
+ * that deck's current-location row. RLS scopes both queries to the caller, so a
+ * foreign or unknown id simply resolves to null rather than leaking anything.
+ */
+export async function getDeckByScanId(scanId: string): Promise<DeckLocation | null> {
+  const { data: scan, error: scanError } = await supabase
+    .from('scans')
+    .select('deck_id')
+    .eq('id', scanId)
+    .maybeSingle()
+
+  if (scanError) throw new Error(`Failed to load scan: ${scanError.message}`)
+  if (!scan) return null
+
+  const { data: deck, error: deckError } = await supabase
+    .from('current_deck_locations')
+    .select(
+      'scan_id, deck_id, deck_name, deck_code, deck_uuid, mv_id, set_id, label, position, scanned_at'
+    )
+    .eq('deck_id', scan.deck_id)
+    .maybeSingle()
+
+  if (deckError) throw new Error(`Failed to load deck: ${deckError.message}`)
+  return deck
+}
+
 export interface DeckScanRecord {
   id: string
   label: string

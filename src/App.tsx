@@ -1,22 +1,21 @@
 import { useState, useEffect } from 'react'
+import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { SettingsView } from './components/SettingsView'
 import { ScanView } from './components/ScanView'
 import { SearchView } from './components/SearchView'
+import { DeckDetailView } from './components/DeckDetailView'
 import { SignInView } from './components/SignInView'
 import { AuthProvider, useAuth } from './hooks/useAuth'
 import { setupAutoSync, getUnsyncedCount } from './services/syncService'
 
-type View = 'scan' | 'search' | 'settings'
-
-const NAV_ITEMS: { view: View; label: string }[] = [
-  { view: 'scan', label: 'Scan' },
-  { view: 'search', label: 'Search' },
-  { view: 'settings', label: 'Settings' },
+const NAV_ITEMS: { to: string; label: string }[] = [
+  { to: '/scan', label: 'Scan' },
+  { to: '/search', label: 'Search' },
+  { to: '/settings', label: 'Settings' },
 ]
 
 function AppContent() {
   const { session, loading } = useAuth()
-  const [view, setView] = useState<View>('scan')
   const [unsyncedCount, setUnsyncedCount] = useState(0)
 
   useEffect(() => {
@@ -61,27 +60,34 @@ function AppContent() {
           <nav className="border-b">
             <div className="container mx-auto px-4">
               <div className="flex gap-4">
-                {NAV_ITEMS.map(({ view: v, label }) => (
-                  <button
-                    key={v}
-                    onClick={() => setView(v)}
-                    className={`px-4 py-2 transition-colors ${
-                      view === v
-                        ? 'border-b-2 border-primary font-medium'
-                        : 'text-muted-foreground hover:text-foreground'
-                    }`}
+                {NAV_ITEMS.map(({ to, label }) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    className={({ isActive }) =>
+                      `px-4 py-2 transition-colors ${
+                        isActive
+                          ? 'border-b-2 border-primary font-medium'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`
+                    }
                   >
                     {label}
-                  </button>
+                  </NavLink>
                 ))}
               </div>
             </div>
           </nav>
 
           <main className="container mx-auto px-4 py-8">
-            {view === 'scan' && <ScanView />}
-            {view === 'search' && <SearchView />}
-            {view === 'settings' && <SettingsView />}
+            <Routes>
+              <Route index element={<Navigate to="/scan" replace />} />
+              <Route path="/scan" element={<ScanView />} />
+              <Route path="/search" element={<SearchView />} />
+              <Route path="/deck/:scanId" element={<DeckDetailView />} />
+              <Route path="/settings" element={<SettingsView />} />
+              <Route path="*" element={<Navigate to="/scan" replace />} />
+            </Routes>
           </main>
         </>
       )}
