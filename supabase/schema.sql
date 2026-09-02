@@ -263,6 +263,7 @@ begin
     select d.id
     from public.decks d
     where d.mv_id is null
+      and d.deck_name is not null   -- only decks with a name are worth an MV lookup
       and d.mv_status <> 'exhausted'
       and (d.mv_lookup_at is null or d.mv_lookup_at < now() - interval '1 day')
     order by d.mv_lookup_at nulls first
