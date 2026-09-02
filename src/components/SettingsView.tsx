@@ -8,6 +8,8 @@ import {
   deleteAccount,
   countNamelessScans,
   backfillDeckNames,
+  countUnresolvedMasterVaultDecks,
+  backfillDeckMasterVaultIds,
 } from '../services/scanService'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../hooks/useAuth'
@@ -23,12 +25,19 @@ export function SettingsView() {
   const [backfilling, setBackfilling] = useState(false)
   const [backfillProgress, setBackfillProgress] = useState('')
   const [backfillMessage, setBackfillMessage] = useState<string | null>(null)
+  const [unresolvedMvCount, setUnresolvedMvCount] = useState(0)
+  const [mvBackfilling, setMvBackfilling] = useState(false)
+  const [mvBackfillProgress, setMvBackfillProgress] = useState('')
+  const [mvBackfillMessage, setMvBackfillMessage] = useState<string | null>(null)
 
   useEffect(() => {
     setUnsyncedCount(getUnsyncedCount())
     countNamelessScans()
       .then(setNamelessCount)
       .catch((error) => console.error('Failed to count nameless scans:', error))
+    countUnresolvedMasterVaultDecks()
+      .then(setUnresolvedMvCount)
+      .catch((error) => console.error('Failed to count unresolved decks:', error))
   }, [])
 
   const handleSync = async () => {
@@ -79,6 +88,31 @@ export function SettingsView() {
     } finally {
       setBackfilling(false)
       setBackfillProgress('')
+    }
+  }
+
+  const handleMvBackfill = async () => {
+    setMvBackfilling(true)
+    setMvBackfillMessage(null)
+    setError(null)
+
+    try {
+      const result = await backfillDeckMasterVaultIds((done, total) => {
+        setMvBackfillProgress(`Resolving deck ${done} of ${total}...`)
+      })
+      const count = await countUnresolvedMasterVaultDecks()
+      setUnresolvedMvCount(count)
+      setMvBackfillMessage(
+        result.remaining > 0
+          ? `Resolved ${result.resolved}; ${result.remaining} still pending ` +
+            '(the background job will keep retrying)'
+          : `Resolved Master Vault IDs for ${result.resolved} deck${result.resolved !== 1 ? 's' : ''}`
+      )
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Master Vault backfill failed')
+    } finally {
+      setMvBackfilling(false)
+      setMvBackfillProgress('')
     }
   }
 
@@ -211,6 +245,38 @@ export function SettingsView() {
             )}
             {backfillMessage && (
               <p className="text-sm text-center text-muted-foreground">{backfillMessage}</p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {(unresolvedMvCount > 0 || mvBackfillMessage) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Master Vault IDs</CardTitle>
+            <CardDescription>
+              {unresolvedMvCount > 0
+                ? `${unresolvedMvCount} deck${unresolvedMvCount !== 1 ? 's are' : ' is'} missing a ` +
+                  'Master Vault ID. These fill in automatically in the background; ' +
+                  'you can also resolve them now.'
+                : 'All decks have Master Vault IDs.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {unresolvedMvCount > 0 && (
+              <Button
+                onClick={handleMvBackfill}
+                disabled={mvBackfilling}
+                variant="outline"
+                className="w-full"
+              >
+                {mvBackfilling
+                  ? mvBackfillProgress || 'Resolving...'
+                  : 'Resolve Master Vault IDs'}
+              </Button>
+            )}
+            {mvBackfillMessage && (
+              <p className="text-sm text-center text-muted-foreground">{mvBackfillMessage}</p>
             )}
           </CardContent>
         </Card>

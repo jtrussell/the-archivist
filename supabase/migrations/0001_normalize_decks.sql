@@ -1,25 +1,24 @@
--- The Archivist — Supabase schema (canonical fresh-install state)
+-- Migration 0001 — Phase A: normalize decks (additive, backward-compatible)
 --
--- Paste this whole file into the Supabase SQL Editor and run it once for a NEW
--- project. For an EXISTING database, apply supabase/migrations/*.sql in order
--- instead (0001 additive, 0002 backfill, 0003 cleanup) so live data is migrated
--- safely. This file reflects the end state those migrations converge to.
+-- Introduces a globally-shared `decks` reference table and links each scan to
+-- it via `scans.deck_ref`, WITHOUT changing any existing read behavior:
+--   * `decks` holds only non-sensitive canonical facts (mv_id, set_id, name +
+--     MV lookup state). It NEVER stores the scanned codes — those stay on
+--     `scans` under per-user RLS.
+--   * `record_scan` is rewritten to also create/link a `decks` row, and keeps
+--     dual-writing the legacy denormalized columns so old clients keep working.
+--   * `current_deck_locations` keeps the exact same output columns (plus an
+--     additive `deck_ref`), sourcing name/mv_id/set_id from `decks` when present
+--     and falling back to the legacy scan columns during the transition.
+--
+-- Safe to run once against the live DB. Run 0002 next to backfill existing rows.
 
-create table public.labels (
-  id         uuid primary key default gen_random_uuid(),
-  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
-  name       text not null check (length(trim(name)) > 0),
-  created_at timestamptz not null default now(),
-  unique (user_id, name)
-);
+-- 1. The shared, public decks reference table -------------------------------
 
--- Globally-shared, public deck reference data. One canonical row per real deck
--- (keyed by mv_id once resolved). Holds only non-sensitive facts — NEVER the
--- scanned codes, which stay on `scans` under per-user RLS.
-create table public.decks (
+create table if not exists public.decks (
   id                 uuid primary key default gen_random_uuid(), -- placeholder identity, stable pre-resolution
   mv_id              uuid,                                        -- canonical Master Vault id; unique once resolved
-  set_id             integer,                                     -- master-vault expansion set id
+  set_id             integer,
   deck_name          text,
   mv_status          text not null default 'pending'
                        check (mv_status in ('pending', 'resolved', 'exhausted')),
@@ -29,64 +28,34 @@ create table public.decks (
   updated_at         timestamptz not null default now()
 );
 
-create unique index decks_mv_id_key on public.decks (mv_id) where mv_id is not null;
-create index decks_unresolved_idx on public.decks (mv_lookup_at)
-  where mv_id is null and mv_status <> 'exhausted';
+-- One canonical row per real deck (partial: many rows may be unresolved/null)
+create unique index if not exists decks_mv_id_key
+  on public.decks (mv_id) where mv_id is not null;
 
-create table public.scans (
-  id         uuid primary key default gen_random_uuid(),
-  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
-  label_id   uuid not null references public.labels(id) on delete cascade,
-  deck_id    text not null,        -- canonical scanned ID: MV uuid if QR was a URL, else uppercased deck code
-  deck_code  text,                 -- e.g. 4Q958-HX64G-JH6P9 (when scanned as code); private to the scanning user
-  deck_uuid  uuid,                 -- keyforgegame.com master-vault uuid (when scanned as URL); private
-  deck_name  text,                 -- nullable; name fetch may fail offline
-  deck_ref   uuid not null references public.decks(id), -- the deck this scan belongs to
-  position   integer not null,     -- per-user, per-label incrementing counter
-  scanned_at timestamptz not null, -- client-side time of scan (accurate for offline scans)
-  created_at timestamptz not null default now()
-);
+-- The background job's work queue: unresolved, not-yet-exhausted decks
+create index if not exists decks_unresolved_idx
+  on public.decks (mv_lookup_at) where mv_id is null and mv_status <> 'exhausted';
 
-create index scans_label_position_idx on public.scans (label_id, position desc);
-create index scans_user_deck_recent_idx on public.scans (user_id, deck_id, created_at desc);
-create index scans_deck_ref_idx on public.scans (deck_ref);
+alter table public.decks enable row level security;
 
-create table public.deck_notes (
-  id         uuid primary key default gen_random_uuid(),
-  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
-  deck_id    text not null,
-  content    text not null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique (user_id, deck_id)
-);
+-- Fully public shared reference data: any authenticated user may read any deck
+-- (it exposes no scanned codes). No insert/update/delete policy exists, so all
+-- writes must go through the SECURITY DEFINER RPCs below or the service role.
+drop policy if exists "decks are public to authenticated" on public.decks;
+create policy "decks are public to authenticated"
+  on public.decks for select to authenticated using (true);
 
-alter table public.labels enable row level security;
-alter table public.scans  enable row level security;
-alter table public.decks  enable row level security;
-alter table public.deck_notes enable row level security;
+-- 2. Link column on scans ---------------------------------------------------
 
-create policy "own labels select" on public.labels for select using (user_id = auth.uid());
-create policy "own labels insert" on public.labels for insert with check (user_id = auth.uid());
-create policy "own labels update" on public.labels for update using (user_id = auth.uid());
-create policy "own scans select"  on public.scans  for select using (user_id = auth.uid());
-create policy "own scans insert"  on public.scans  for insert with check (user_id = auth.uid());
-create policy "own scans update"  on public.scans  for update
-  using (user_id = auth.uid()) with check (user_id = auth.uid());
--- decks is fully public reference data (no scanned codes): any authenticated
--- user may read any row. Writes go only through the SECURITY DEFINER RPCs below
--- or the service role — there is deliberately no insert/update/delete policy.
-create policy "decks are public to authenticated" on public.decks for select to authenticated using (true);
-create policy "own notes select" on public.deck_notes for select using (user_id = auth.uid());
-create policy "own notes insert" on public.deck_notes for insert with check (user_id = auth.uid());
-create policy "own notes update" on public.deck_notes for update
-  using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy "own notes delete" on public.deck_notes for delete using (user_id = auth.uid());
+alter table public.scans
+  add column if not exists deck_ref uuid references public.decks(id);
 
--- Atomic scan recording: the label upsert row-locks the label, serializing
--- max(position)+1 per (user, label); returns the assigned position for the UI.
--- SECURITY DEFINER because it also creates/links the shared `decks` row (which
--- authenticated users cannot write directly); every write is scoped to auth.uid().
+create index if not exists scans_deck_ref_idx on public.scans (deck_ref);
+
+-- 3. record_scan: create/link a deck at scan time (dual-writes legacy cols) --
+--
+-- Now SECURITY DEFINER because it writes the `decks` table (which authenticated
+-- users cannot write directly). It still scopes every write to auth.uid().
 create or replace function public.record_scan(
   p_label      text,
   p_deck_id    text,
@@ -117,11 +86,11 @@ begin
   from scans s where s.label_id = v_label_id;
 
   -- Within-user exact-identifier match: reuse the deck this user already has
-  -- for this scanned identifier. Cross-format / cross-user consolidation happens
-  -- later at mv_id resolution (see link_deck_master_vault).
+  -- for this scanned identifier (same uuid, same code, or same legacy deck_id).
   select s.deck_ref into v_deck_ref
   from scans s
   where s.user_id = v_uid
+    and s.deck_ref is not null
     and (
       (p_deck_uuid is not null and s.deck_uuid = p_deck_uuid)
       or (p_deck_code is not null and s.deck_code = p_deck_code)
@@ -130,9 +99,13 @@ begin
   limit 1;
 
   if v_deck_ref is null then
+    -- New (to this user) identifier -> fresh placeholder deck. Cross-format /
+    -- cross-user consolidation happens later at mv_id resolution (see
+    -- link_deck_master_vault).
     insert into decks (deck_name) values (p_deck_name)
     returning id into v_deck_ref;
   elsif p_deck_name is not null then
+    -- Opportunistically fill a name we now have but the deck lacked
     update decks set deck_name = coalesce(deck_name, p_deck_name), updated_at = now()
     where id = v_deck_ref and deck_name is null;
   end if;
@@ -147,10 +120,14 @@ end $$;
 revoke execute on function public.record_scan(text, text, text, text, uuid, timestamptz) from anon;
 grant execute on function public.record_scan(text, text, text, text, uuid, timestamptz) to authenticated;
 
--- Resolution primitive (client fast-path): upsert the canonical deck row keyed
--- by mv_id and, if it already existed, merge this placeholder onto it (repoint
--- the caller's own scans, delete the orphan). p_mv_id = null records a failed
--- attempt (marks 'exhausted' past a threshold).
+-- 4. Resolution primitive: link a placeholder to its canonical deck ----------
+--
+-- Called by the client fast-path (repoints only the caller's own scans) after
+-- it resolves an mv_id. Upserts the canonical public row keyed by mv_id; if a
+-- canonical row already exists (same real deck resolved earlier, possibly from
+-- another format or user), MERGES: repoints the caller's scans onto it and
+-- deletes the now-orphan placeholder. Pass p_mv_id = null to record a failed
+-- attempt (bumps attempts; marks 'exhausted' past a threshold).
 create or replace function public.link_deck_master_vault(
   p_deck_ref uuid,
   p_mv_id    uuid,
@@ -200,8 +177,12 @@ end $$;
 revoke execute on function public.link_deck_master_vault(uuid, uuid, integer, text) from anon;
 grant execute on function public.link_deck_master_vault(uuid, uuid, integer, text) to authenticated;
 
--- Admin variant (service-role / cron only): repoints ALL scans that reference
--- the placeholder, since the background job canonicalizes across every user.
+-- 5. Admin resolution primitive (service-role / cron only) -------------------
+--
+-- Same as above but repoints ALL scans that reference the placeholder (not just
+-- one user's), since the background job canonicalizes across every user. Not
+-- granted to anon or authenticated; only the service role (which bypasses RLS)
+-- invokes it from the Edge Function.
 create or replace function public.link_deck_master_vault_admin(
   p_deck_ref uuid,
   p_mv_id    uuid,
@@ -246,13 +227,14 @@ end $$;
 revoke execute on function public.link_deck_master_vault_admin(uuid, uuid, integer, text) from anon, authenticated;
 grant execute on function public.link_deck_master_vault_admin(uuid, uuid, integer, text) to service_role;
 
--- Work queue for the background job (service-role / cron only): CLAIMS a small
--- batch of unresolved decks and returns each with one representative scan's
--- private code/uuid. Claiming = FOR UPDATE SKIP LOCKED + stamping mv_lookup_at
--- at selection, so concurrent or stacked invocations get disjoint rows (never
--- duplicate work) and an already-claimed row is not re-handed-out until the 24h
--- backoff. The caller processes each claimed row immediately, so keep p_limit
--- small (the Edge Function loops over many small claims within a time budget).
+-- 5b. Work queue for the background job (service-role / cron only) -----------
+--
+-- CLAIMS a small batch of unresolved decks (FOR UPDATE SKIP LOCKED + stamping
+-- mv_lookup_at at selection) and returns each with one representative scan's
+-- private code/uuid. Claiming means concurrent / stacked invocations get
+-- disjoint rows (no duplicate work) and a claimed row is not re-handed-out until
+-- the 24h backoff. Keep p_limit small; the Edge Function loops over many small
+-- claims within a time budget.
 create or replace function public.decks_pending_resolution(p_limit integer default 25)
 returns table (id uuid, deck_name text, deck_code text, deck_uuid uuid)
 language plpgsql security definer set search_path = public
@@ -290,35 +272,20 @@ end $$;
 revoke execute on function public.decks_pending_resolution(integer) from anon, authenticated;
 grant execute on function public.decks_pending_resolution(integer) to service_role;
 
--- Delete the calling user's account and all their data. security definer so it
--- can remove the auth.users row; labels/scans cascade from the FK. Irreversible.
-create or replace function public.delete_account()
-returns void
-language plpgsql security definer set search_path = public
-as $$
-begin
-  if auth.uid() is null then
-    raise exception 'Not authenticated';
-  end if;
-  delete from auth.users where id = auth.uid();
-end $$;
+-- 6. View: source canonical facts from decks, keep identical output shape ----
 
-revoke execute on function public.delete_account from anon, public;
-grant execute on function public.delete_account to authenticated;
-
--- Current location per deck (most recent scan wins); security_invoker so RLS
--- applies. Canonical name/mv_id/set_id come from `decks` (name falls back to the
--- scan's own value during/after transition).
 create or replace view public.current_deck_locations
 with (security_invoker = true) as
--- deck_ref is LAST so that applying migrations (which use CREATE OR REPLACE VIEW
--- and cannot reorder existing columns) converges to this exact shape.
+-- NOTE: `deck_ref` is appended LAST. CREATE OR REPLACE VIEW can only add new
+-- columns at the end of an existing view — inserting one mid-list would rename
+-- an existing column and error. Column order is irrelevant to the client, which
+-- selects by name.
 select distinct on (s.user_id, s.deck_id)
   s.id as scan_id, s.user_id, s.deck_id,
   coalesce(d.deck_name, s.deck_name) as deck_name,
   s.deck_code, s.deck_uuid,
-  d.mv_id,
-  d.set_id,
+  coalesce(d.mv_id, s.mv_id)   as mv_id,
+  coalesce(d.set_id, s.set_id) as set_id,
   l.name as label, s.position, s.scanned_at, s.created_at,
   s.deck_ref
 from public.scans s

@@ -17,6 +17,8 @@ export interface DeckLocation {
   deck_name: string | null
   deck_code: string | null
   deck_uuid: string | null
+  /** The canonical deck this scan belongs to (decks.id); used for MV resolution */
+  deck_ref: string | null
   mv_id: string | null
   set_id: number | null
   label: string
@@ -95,6 +97,22 @@ export async function countNamelessScans(): Promise<number> {
     .is('deck_name', null)
 
   if (error) throw new Error(`Failed to count nameless scans: ${error.message}`)
+  return count ?? 0
+}
+
+/**
+ * Count the current user's decks that have a name but no Master Vault id yet
+ * (candidates for the MV backfill). Counts view rows, so a deck scanned under
+ * multiple identifier forms may be counted more than once.
+ */
+export async function countUnresolvedMasterVaultDecks(): Promise<number> {
+  const { count, error } = await supabase
+    .from('current_deck_locations')
+    .select('scan_id', { count: 'exact', head: true })
+    .is('mv_id', null)
+    .not('deck_name', 'is', null)
+
+  if (error) throw new Error(`Failed to count unresolved decks: ${error.message}`)
   return count ?? 0
 }
 
@@ -179,22 +197,72 @@ export async function backfillSingleDeckName(deck: {
   return name
 }
 
+/**
+ * Resolve one deck's Master Vault info by name and persist it to the shared
+ * `decks` row via the link_deck_master_vault RPC (which also merges any
+ * cross-format / cross-user duplicate onto the canonical row). On a lookup miss
+ * this writes nothing — attempt-counting and 'exhausted' backoff are left to the
+ * background job, so a detail-page visit can't prematurely exhaust a deck.
+ */
 export async function backfillDeckMasterVaultInfo(deck: {
-  deck_id: string
+  deck_ref: string | null
   deck_name: string | null
 }): Promise<MasterVaultDeckInfo | null> {
-  if (deck.deck_name === null) return null
+  if (deck.deck_ref === null || deck.deck_name === null) return null
 
   const info = await fetchDeckMasterVaultInfo(deck.deck_name)
   if (info === null) return null
 
-  const { error } = await supabase
-    .from('scans')
-    .update({ mv_id: info.mvId, set_id: info.setId })
-    .eq('deck_id', deck.deck_id)
+  const { error } = await supabase.rpc('link_deck_master_vault', {
+    p_deck_ref: deck.deck_ref,
+    p_mv_id: info.mvId,
+    p_set_id: info.setId,
+    p_name: deck.deck_name,
+  })
 
   if (error) throw new Error(`Failed to save Master Vault info: ${error.message}`)
   return info
+}
+
+/**
+ * Client-side fallback sweep: resolve Master Vault ids for the current user's
+ * decks that still lack one (the server cron handles this globally; this is for
+ * on-demand use from Settings). Politely throttled, one API call per deck.
+ */
+export async function backfillDeckMasterVaultIds(
+  onProgress?: (done: number, total: number) => void
+): Promise<{ resolved: number; remaining: number }> {
+  const { data, error } = await supabase
+    .from('current_deck_locations')
+    .select('deck_ref, deck_name')
+    .is('mv_id', null)
+    .not('deck_name', 'is', null)
+
+  if (error) throw new Error(`Failed to load unresolved decks: ${error.message}`)
+
+  // One deck can surface once per (deck_id) grouping; resolve each deck once
+  const uniqueDecks = new Map<string, string>() // deck_ref -> deck_name
+  for (const row of data ?? []) {
+    if (row.deck_ref && row.deck_name && !uniqueDecks.has(row.deck_ref)) {
+      uniqueDecks.set(row.deck_ref, row.deck_name)
+    }
+  }
+
+  let resolved = 0
+  let done = 0
+  for (const [deckRef, deckName] of uniqueDecks) {
+    const info = await backfillDeckMasterVaultInfo({ deck_ref: deckRef, deck_name: deckName })
+    if (info !== null) resolved++
+
+    done++
+    onProgress?.(done, uniqueDecks.size)
+
+    if (done < uniqueDecks.size) {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    }
+  }
+
+  return { resolved, remaining: uniqueDecks.size - resolved }
 }
 
 /**
@@ -203,7 +271,9 @@ export async function backfillDeckMasterVaultInfo(deck: {
 export async function exportScansCsv(): Promise<string> {
   const { data, error } = await supabase
     .from('scans')
-    .select('scanned_at, deck_id, deck_code, deck_uuid, deck_name, position, labels(name)')
+    .select(
+      'scanned_at, deck_id, deck_code, deck_uuid, deck_name, position, labels(name), decks:deck_ref(mv_id, set_id)'
+    )
     .order('scanned_at', { ascending: true })
 
   if (error) throw new Error(`Export failed: ${error.message}`)
@@ -214,10 +284,11 @@ export async function exportScansCsv(): Promise<string> {
     return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str
   }
 
-  const header = 'scanned_at,label,position,deck_name,deck_id,deck_code,deck_uuid'
+  const header = 'scanned_at,label,position,deck_name,deck_id,deck_code,deck_uuid,mv_id,set_id'
   const rows = (data ?? []).map((row) => {
-    // labels(name) is a many-to-one join: supabase-js types it loosely
+    // labels(name) / decks(...) are many-to-one joins: supabase-js types them loosely
     const label = (row.labels as unknown as { name: string } | null)?.name ?? ''
+    const deck = row.decks as unknown as { mv_id: string | null; set_id: number | null } | null
     return [
       row.scanned_at,
       label,
@@ -226,6 +297,8 @@ export async function exportScansCsv(): Promise<string> {
       row.deck_id,
       row.deck_code,
       row.deck_uuid,
+      deck?.mv_id ?? null,
+      deck?.set_id ?? null,
     ].map(escape).join(',')
   })
 
@@ -263,7 +336,7 @@ export async function searchDecks(
   let builder = supabase
     .from('current_deck_locations')
     .select(
-      'scan_id, deck_id, deck_name, deck_code, deck_uuid, mv_id, set_id, label, position, scanned_at',
+      'scan_id, deck_id, deck_name, deck_code, deck_uuid, deck_ref, mv_id, set_id, label, position, scanned_at',
       { count: 'exact' }
     )
 
@@ -306,7 +379,7 @@ export async function getDeckByScanId(scanId: string): Promise<DeckLocation | nu
   const { data: deck, error: deckError } = await supabase
     .from('current_deck_locations')
     .select(
-      'scan_id, deck_id, deck_name, deck_code, deck_uuid, mv_id, set_id, label, position, scanned_at'
+      'scan_id, deck_id, deck_name, deck_code, deck_uuid, deck_ref, mv_id, set_id, label, position, scanned_at'
     )
     .eq('deck_id', scan.deck_id)
     .maybeSingle()
