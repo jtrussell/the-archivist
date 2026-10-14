@@ -70,7 +70,7 @@ export function SearchView() {
               setQuery(e.target.value)
               setPage(0)
             }}
-            placeholder={missingNamesOnly ? 'Search by scan ID...' : 'Search by deck name...'}
+            placeholder={missingNamesOnly ? 'Search by scan ID or clone code...' : 'Search by deck name...'}
             className="text-lg"
           />
           <div className="mt-3 flex items-center justify-between gap-4">
@@ -126,6 +126,11 @@ export function SearchView() {
                   <div className="min-w-0">
                     <p className="font-medium break-words">
                       {deck.deck_name ?? deck.deck_id}
+                      {deck.is_clone && (
+                        <span className="ml-2 align-middle text-xs bg-purple-900 text-purple-200 px-2 py-0.5 rounded-full">
+                          Clone
+                        </span>
+                      )}
                     </p>
                     <p className="text-sm text-muted-foreground mt-1">
                       Scanned {new Date(deck.scanned_at).toLocaleString()}

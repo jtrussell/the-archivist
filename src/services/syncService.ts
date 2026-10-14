@@ -18,8 +18,10 @@ export interface ScanResult {
   queued: boolean
   /** Position assigned by the database, when the scan synced immediately */
   position?: number
-  /** Deck name from the Master Vault lookup; null when the lookup failed */
+  /** Deck name from the Master Vault lookup (or already known for this copy); null when unknown */
   deckName?: string | null
+  /** True when the scanned code is a Ghost Galaxy deck clone */
+  isClone?: boolean
   error?: string
 }
 
@@ -29,6 +31,8 @@ export interface SyncSummary {
   errors: string[]
   /** Position assigned to the last successfully synced scan */
   lastPosition?: number
+  /** Name the database recorded for the last successfully synced scan */
+  lastDeckName?: string | null
 }
 
 /**
@@ -49,6 +53,7 @@ export async function recordScan(
       deckCode: deck.deckCode,
       deckUuid: deck.deckUuid,
       deckName: deck.deckName,
+      isClone: deck.isClone,
       synced: false,
     })
 
@@ -59,12 +64,15 @@ export async function recordScan(
           success: true,
           queued: false,
           position: result.lastPosition,
-          deckName: deck.deckName,
+          // The database may know a name the API couldn't give us (a linked
+          // clone, or a name the user entered earlier for this copy)
+          deckName: result.lastDeckName ?? deck.deckName,
+          isClone: deck.isClone,
         }
       }
     }
 
-    return { success: true, queued: true, deckName: deck.deckName }
+    return { success: true, queued: true, deckName: deck.deckName, isClone: deck.isClone }
   } catch (error) {
     console.error('Failed to record scan:', error)
     return {
@@ -110,10 +118,12 @@ async function doSyncQueue(): Promise<SyncSummary> {
 
   let syncedCount = 0
   let lastPosition: number | undefined
+  let lastDeckName: string | null | undefined
 
   for (const item of unsynced) {
     try {
-      // Backfill the deck name if the fetch failed at scan time (e.g. offline)
+      // Backfill the deck name if the fetch failed at scan time (e.g. offline).
+      // Clone codes are skipped inside fetchDeckName (the API can't resolve them).
       let deckName = item.deckName
       if (deckName === null) {
         deckName = await fetchDeckName(item)
@@ -129,11 +139,13 @@ async function doSyncQueue(): Promise<SyncSummary> {
         deckCode: item.deckCode,
         deckUuid: item.deckUuid,
         scannedAt: item.scannedAt,
+        isClone: item.isClone ?? false,
       })
 
       markQueueItemSynced(item.id)
       syncedCount++
       lastPosition = recorded.position
+      lastDeckName = recorded.deckName
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Unknown error'
       return {
@@ -141,6 +153,7 @@ async function doSyncQueue(): Promise<SyncSummary> {
         failed: unsynced.length - syncedCount,
         errors: [errorMsg],
         lastPosition,
+        lastDeckName,
       }
     }
   }
@@ -148,7 +161,7 @@ async function doSyncQueue(): Promise<SyncSummary> {
   // Housekeeping: clear synced items
   setTimeout(clearSyncedQueueItems, 1000)
 
-  return { synced: syncedCount, failed: 0, errors: [], lastPosition }
+  return { synced: syncedCount, failed: 0, errors: [], lastPosition, lastDeckName }
 }
 
 /**

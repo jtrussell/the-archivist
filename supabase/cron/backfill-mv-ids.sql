@@ -13,11 +13,13 @@
 -- Every 5 minutes: POST the function. It returns 202 immediately and drains the
 -- queue in a background loop (up to ~120s) over small CLAIMED chunks, so:
 --   * runs never approach the 150s free-tier wall limit,
---   * overlapping/stacked invocations claim disjoint rows (no duplicate work),
+--   * a run (≤~135s) finishes before the next 5-min tick, so they don't overlap;
+--     and even if one did, the claim (SKIP LOCKED) hands out disjoint rows so
+--     nothing is duplicated,
 --   * the job is idempotent and resumable (only mv_id IS NULL rows are claimed),
 --     so a missed or interrupted tick simply retries next run.
--- The http_post returns as soon as the function sends its 202, so the short
--- pg_net timeout below is ample; it is set generously only as a safety margin.
+-- The http_post returns as soon as the function sends its 202, so the pg_net
+-- timeout below is ample; it is set generously only as a safety margin.
 select cron.schedule(
   'backfill-mv-ids',
   '*/5 * * * *',

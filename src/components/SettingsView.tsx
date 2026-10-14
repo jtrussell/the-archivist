@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Button } from './ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card'
 import { getUnsyncedCount, syncQueue } from '../services/syncService'
@@ -7,6 +8,7 @@ import {
   exportScansCsv,
   deleteAccount,
   countNamelessScans,
+  countUnlinkedClones,
   backfillDeckNames,
   countUnresolvedMasterVaultDecks,
   backfillDeckMasterVaultIds,
@@ -16,7 +18,9 @@ import { useAuth } from '../hooks/useAuth'
 
 export function SettingsView() {
   const { session, signOut } = useAuth()
+  const navigate = useNavigate()
   const [loading, setLoading] = useState(false)
+  const [unlinkedClones, setUnlinkedClones] = useState(0)
   const [exporting, setExporting] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -35,6 +39,9 @@ export function SettingsView() {
     countNamelessScans()
       .then(setNamelessCount)
       .catch((error) => console.error('Failed to count nameless scans:', error))
+    countUnlinkedClones()
+      .then(setUnlinkedClones)
+      .catch((error) => console.error('Failed to count unlinked clones:', error))
     countUnresolvedMasterVaultDecks()
       .then(setUnresolvedMvCount)
       .catch((error) => console.error('Failed to count unresolved decks:', error))
@@ -250,6 +257,29 @@ export function SettingsView() {
         </Card>
       )}
 
+      {unlinkedClones > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Deck Clones</CardTitle>
+            <CardDescription>
+              {unlinkedClones} deck clone{unlinkedClones !== 1 ? 's are' : ' is'} not linked to
+              an original yet. The Master Vault cannot look up clone codes, so open each one and
+              link it to its original (paste a Master Vault link, the original&apos;s code, or
+              search by name).
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              variant="outline"
+              className="w-full"
+              onClick={() => navigate('/search?missing=1')}
+            >
+              Show Unlinked Clones
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {(unresolvedMvCount > 0 || mvBackfillMessage) && (
         <Card>
           <CardHeader>
@@ -313,6 +343,10 @@ export function SettingsView() {
           </p>
           <p>
             4. Use Search to find a deck's current location and position by name
+          </p>
+          <p>
+            5. Deck clones (codes starting with C-) are tracked as their own physical
+            copies; link each to its original from the deck page
           </p>
         </CardContent>
       </Card>

@@ -21,8 +21,11 @@ create table public.decks (
   mv_id              uuid,                                        -- canonical Master Vault id; unique once resolved
   set_id             integer,                                     -- master-vault expansion set id
   deck_name          text,
+  -- pending: no mv_id yet (name-search job will try) | exhausted: gave up
+  -- unverified: mv_id asserted by a client, awaiting by-id verification
+  -- resolved: confirmed by the server | invalid: asserted mv_id doesn't exist
   mv_status          text not null default 'pending'
-                       check (mv_status in ('pending', 'resolved', 'exhausted')),
+                       check (mv_status in ('pending', 'resolved', 'exhausted', 'unverified', 'invalid')),
   mv_lookup_attempts integer not null default 0,
   mv_lookup_at       timestamptz,
   created_at         timestamptz not null default now(),
@@ -32,6 +35,8 @@ create table public.decks (
 create unique index decks_mv_id_key on public.decks (mv_id) where mv_id is not null;
 create index decks_unresolved_idx on public.decks (mv_lookup_at)
   where mv_id is null and mv_status <> 'exhausted';
+create index decks_unverified_idx on public.decks (mv_lookup_at)
+  where mv_status = 'unverified';
 
 create table public.scans (
   id         uuid primary key default gen_random_uuid(),
@@ -41,7 +46,9 @@ create table public.scans (
   deck_code  text,                 -- e.g. 4Q958-HX64G-JH6P9 (when scanned as code); private to the scanning user
   deck_uuid  uuid,                 -- keyforgegame.com master-vault uuid (when scanned as URL); private
   deck_name  text,                 -- nullable; name fetch may fail offline
+  name_source text check (name_source in ('api', 'manual')), -- where deck_name came from
   deck_ref   uuid not null references public.decks(id), -- the deck this scan belongs to
+  is_clone   boolean not null default false, -- Ghost Galaxy deck clone (C- prefixed code)
   position   integer not null,     -- per-user, per-label incrementing counter
   scanned_at timestamptz not null, -- client-side time of scan (accurate for offline scans)
   created_at timestamptz not null default now()
@@ -84,25 +91,32 @@ create policy "own notes update" on public.deck_notes for update
 create policy "own notes delete" on public.deck_notes for delete using (user_id = auth.uid());
 
 -- Atomic scan recording: the label upsert row-locks the label, serializing
--- max(position)+1 per (user, label); returns the assigned position for the UI.
--- SECURITY DEFINER because it also creates/links the shared `decks` row (which
--- authenticated users cannot write directly); every write is scoped to auth.uid().
+-- max(position)+1 per (user, label); returns the assigned position (and the
+-- name recorded) for the UI. SECURITY DEFINER because it also creates/links the
+-- shared `decks` row; every write is scoped to auth.uid(). Manual names
+-- (name_source = 'manual') are carried forward on rescan but never written to
+-- `decks` — only API-sourced names may fill a shared row.
 create or replace function public.record_scan(
   p_label      text,
   p_deck_id    text,
   p_deck_name  text default null,
   p_deck_code  text default null,
   p_deck_uuid  uuid default null,
-  p_scanned_at timestamptz default now()
-) returns table (scan_id uuid, label_id uuid, "position" integer)
+  p_scanned_at timestamptz default now(),
+  p_is_clone   boolean default false
+) returns table (scan_id uuid, label_id uuid, "position" integer, deck_name text)
 language plpgsql security definer set search_path = public
 as $$
+#variable_conflict use_column
 declare
-  v_uid      uuid := auth.uid();
-  v_label_id uuid;
-  v_pos      integer;
-  v_scan_id  uuid;
-  v_deck_ref uuid;
+  v_uid       uuid := auth.uid();
+  v_label_id  uuid;
+  v_pos       integer;
+  v_scan_id   uuid;
+  v_deck_ref  uuid;
+  v_deck_name text;
+  v_name      text;
+  v_source    text;
 begin
   if v_uid is null then
     raise exception 'Not authenticated';
@@ -117,8 +131,10 @@ begin
   from scans s where s.label_id = v_label_id;
 
   -- Within-user exact-identifier match: reuse the deck this user already has
-  -- for this scanned identifier. Cross-format / cross-user consolidation happens
-  -- later at mv_id resolution (see link_deck_master_vault).
+  -- for this scanned identifier. A clone code keeps its C- prefix, so it never
+  -- matches the original's code here; clones join their original only via
+  -- attach_scans_to_deck. Cross-format / cross-user consolidation happens at
+  -- mv_id resolution (link_deck_master_vault / verification).
   select s.deck_ref into v_deck_ref
   from scans s
   where s.user_id = v_uid
@@ -133,23 +149,111 @@ begin
     insert into decks (deck_name) values (p_deck_name)
     returning id into v_deck_ref;
   elsif p_deck_name is not null then
-    update decks set deck_name = coalesce(deck_name, p_deck_name), updated_at = now()
-    where id = v_deck_ref and deck_name is null;
+    -- Only an API-sourced name may fill a nameless shared row
+    update decks d set deck_name = coalesce(d.deck_name, p_deck_name), updated_at = now()
+    where d.id = v_deck_ref and d.deck_name is null;
   end if;
 
-  insert into scans (user_id, label_id, deck_id, deck_code, deck_uuid, deck_name, deck_ref, position, scanned_at)
-  values (v_uid, v_label_id, p_deck_id, p_deck_code, p_deck_uuid, p_deck_name, v_deck_ref, v_pos, p_scanned_at)
+  -- Name stored on this scan row: the API's answer, else the shared deck's
+  -- name, else whatever this user last recorded for this copy (so a manually
+  -- entered name survives a rescan). Manual names never flow into `decks`.
+  select d.deck_name into v_deck_name from decks d where d.id = v_deck_ref;
+  if p_deck_name is not null then
+    v_name := p_deck_name; v_source := 'api';
+  elsif v_deck_name is not null then
+    v_name := v_deck_name; v_source := 'api';
+  else
+    select s.deck_name, s.name_source into v_name, v_source
+    from scans s
+    where s.user_id = v_uid and s.deck_id = p_deck_id and s.deck_name is not null
+    order by s.created_at desc
+    limit 1;
+  end if;
+
+  insert into scans (user_id, label_id, deck_id, deck_code, deck_uuid, deck_name, name_source,
+                     deck_ref, position, scanned_at, is_clone)
+  values (v_uid, v_label_id, p_deck_id, p_deck_code, p_deck_uuid, v_name, v_source,
+          v_deck_ref, v_pos, p_scanned_at, coalesce(p_is_clone, false))
   returning id into v_scan_id;
 
-  return query select v_scan_id, v_label_id, v_pos;
+  return query select v_scan_id, v_label_id, v_pos, v_name;
 end $$;
 
-revoke execute on function public.record_scan(text, text, text, text, uuid, timestamptz) from anon;
-grant execute on function public.record_scan(text, text, text, text, uuid, timestamptz) to authenticated;
+revoke execute on function public.record_scan(text, text, text, text, uuid, timestamptz, boolean) from anon;
+grant execute on function public.record_scan(text, text, text, text, uuid, timestamptz, boolean) to authenticated;
+
+
+-- Manual escape hatch: attach all of the caller's scans of one identifier
+-- (typically a clone code, or an original the API couldn't name) to a deck —
+-- either a Master Vault id hydrated client-side (created 'unverified'; the job
+-- confirms it by id) or a deck already in the caller's collection. Only the
+-- caller's scans move; existing canonical rows are never overwritten.
+create or replace function public.attach_scans_to_deck(
+  p_deck_id         text,
+  p_mv_id           uuid    default null,
+  p_set_id          integer default null,
+  p_name            text    default null,
+  p_target_deck_ref uuid    default null
+) returns uuid
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_uid       uuid := auth.uid();
+  v_canonical uuid;
+  v_old       uuid[];
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated';
+  end if;
+  if (p_mv_id is null) = (p_target_deck_ref is null) then
+    raise exception 'Provide exactly one of p_mv_id or p_target_deck_ref';
+  end if;
+  if not exists (select 1 from scans s where s.user_id = v_uid and s.deck_id = p_deck_id) then
+    raise exception 'No scans of % in your collection', p_deck_id;
+  end if;
+
+  if p_target_deck_ref is not null then
+    if not exists (select 1 from scans s where s.user_id = v_uid and s.deck_ref = p_target_deck_ref) then
+      raise exception 'Target deck is not in your collection';
+    end if;
+    v_canonical := p_target_deck_ref;
+  else
+    insert into decks (mv_id, set_id, deck_name, mv_status)
+    values (p_mv_id, p_set_id, p_name, 'unverified')
+    on conflict (mv_id) where mv_id is not null
+    do update set set_id     = coalesce(decks.set_id, excluded.set_id),
+                  deck_name  = coalesce(decks.deck_name, excluded.deck_name),
+                  -- a re-asserted 'invalid' id gets another verification pass;
+                  -- an existing 'resolved' row is left exactly as it is
+                  mv_status  = case when decks.mv_status = 'invalid' then 'unverified'
+                                    else decks.mv_status end,
+                  updated_at = now()
+    returning id into v_canonical;
+  end if;
+
+  select array_agg(distinct s.deck_ref) into v_old
+  from scans s
+  where s.user_id = v_uid and s.deck_id = p_deck_id and s.deck_ref <> v_canonical;
+
+  update scans s set deck_ref = v_canonical
+  where s.user_id = v_uid and s.deck_id = p_deck_id and s.deck_ref <> v_canonical;
+
+  delete from decks d
+  where d.id = any (coalesce(v_old, '{}'))
+    and d.mv_id is null
+    and not exists (select 1 from scans s where s.deck_ref = d.id);
+
+  return v_canonical;
+end $$;
+
+revoke execute on function public.attach_scans_to_deck(text, uuid, integer, text, uuid) from anon;
+grant execute on function public.attach_scans_to_deck(text, uuid, integer, text, uuid) to authenticated;
+
 
 -- Resolution primitive (client fast-path): upsert the canonical deck row keyed
--- by mv_id and, if it already existed, merge this placeholder onto it (repoint
--- the caller's own scans, delete the orphan). p_mv_id = null records a failed
+-- by mv_id as 'unverified' and, if it already existed, merge this placeholder
+-- onto it (repoint the caller's own scans, delete the orphan). Never overwrites
+-- an existing row's name/set_id/status. p_mv_id = null records a failed
 -- attempt (marks 'exhausted' past a threshold).
 create or replace function public.link_deck_master_vault(
   p_deck_ref uuid,
@@ -176,13 +280,13 @@ begin
     return p_deck_ref;
   end if;
 
-  insert into decks (mv_id, set_id, deck_name, mv_status, mv_lookup_at)
-  values (p_mv_id, p_set_id, p_name, 'resolved', now())
+  insert into decks (mv_id, set_id, deck_name, mv_status)
+  values (p_mv_id, p_set_id, p_name, 'unverified')
   on conflict (mv_id) where mv_id is not null
-  do update set set_id    = coalesce(excluded.set_id, decks.set_id),
-                deck_name = coalesce(decks.deck_name, excluded.deck_name),
-                mv_status = 'resolved',
-                mv_lookup_at = now(),
+  do update set set_id     = coalesce(decks.set_id, excluded.set_id),
+                deck_name  = coalesce(decks.deck_name, excluded.deck_name),
+                mv_status  = case when decks.mv_status = 'invalid' then 'unverified'
+                                  else decks.mv_status end,
                 updated_at = now()
   returning id into v_canonical;
 
@@ -191,11 +295,13 @@ begin
       where deck_ref = p_deck_ref and user_id = auth.uid();
     delete from decks
       where id = p_deck_ref
+        and mv_id is null
         and not exists (select 1 from scans where deck_ref = p_deck_ref);
   end if;
 
   return v_canonical;
 end $$;
+
 
 revoke execute on function public.link_deck_master_vault(uuid, uuid, integer, text) from anon;
 grant execute on function public.link_deck_master_vault(uuid, uuid, integer, text) to authenticated;
@@ -246,13 +352,73 @@ end $$;
 revoke execute on function public.link_deck_master_vault_admin(uuid, uuid, integer, text) from anon, authenticated;
 grant execute on function public.link_deck_master_vault_admin(uuid, uuid, integer, text) to service_role;
 
+-- Claims a batch of 'unverified' decks (SKIP LOCKED + stamp, 1h backoff so a
+-- transient API failure is retried soon) and returns their asserted mv_id.
+create or replace function public.decks_pending_verification(p_limit integer default 25)
+returns table (id uuid, mv_id uuid)
+language plpgsql security definer set search_path = public
+as $$
+begin
+  return query
+  with claimed as (
+    select d.id
+    from public.decks d
+    where d.mv_status = 'unverified'
+      and d.mv_id is not null
+      and (d.mv_lookup_at is null or d.mv_lookup_at < now() - interval '1 hour')
+    order by d.mv_lookup_at nulls first
+    limit p_limit
+    for update skip locked
+  )
+  update public.decks d
+  set mv_lookup_at = now(), updated_at = now()
+  from claimed c
+  where d.id = c.id
+  returning d.id, d.mv_id;
+end $$;
+
+revoke execute on function public.decks_pending_verification(integer) from anon, authenticated;
+grant execute on function public.decks_pending_verification(integer) to service_role;
+
+-- Records the server's verdict. A valid id overwrites name/set_id with the
+-- Master Vault's answer (API truth beats any client assertion); an invalid id
+-- flags the row so the UI can ask the user to re-link.
+create or replace function public.verify_deck_admin(
+  p_deck_ref uuid,
+  p_valid    boolean,
+  p_name     text    default null,
+  p_set_id   integer default null
+) returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if p_valid then
+    update decks
+      set deck_name    = coalesce(p_name, deck_name),
+          set_id       = coalesce(p_set_id, set_id),
+          mv_status    = 'resolved',
+          mv_lookup_at = now(),
+          updated_at   = now()
+      where id = p_deck_ref;
+  else
+    update decks
+      set mv_status          = 'invalid',
+          mv_lookup_attempts = mv_lookup_attempts + 1,
+          mv_lookup_at       = now(),
+          updated_at         = now()
+      where id = p_deck_ref;
+  end if;
+end $$;
+
+revoke execute on function public.verify_deck_admin(uuid, boolean, text, integer) from anon, authenticated;
+grant execute on function public.verify_deck_admin(uuid, boolean, text, integer) to service_role;
+
 -- Work queue for the background job (service-role / cron only): CLAIMS a small
 -- batch of unresolved decks and returns each with one representative scan's
--- private code/uuid. Claiming = FOR UPDATE SKIP LOCKED + stamping mv_lookup_at
--- at selection, so concurrent or stacked invocations get disjoint rows (never
--- duplicate work) and an already-claimed row is not re-handed-out until the 24h
--- backoff. The caller processes each claimed row immediately, so keep p_limit
--- small (the Edge Function loops over many small claims within a time budget).
+-- private code/uuid (preferring a non-clone scan). Claiming = FOR UPDATE SKIP
+-- LOCKED + stamping mv_lookup_at at selection, so concurrent or stacked
+-- invocations get disjoint rows and a claimed row is not re-handed-out until
+-- the 24h backoff. Keep p_limit small.
 create or replace function public.decks_pending_resolution(p_limit integer default 25)
 returns table (id uuid, deck_name text, deck_code text, deck_uuid uuid)
 language plpgsql security definer set search_path = public
@@ -263,7 +429,7 @@ begin
     select d.id
     from public.decks d
     where d.mv_id is null
-      and d.deck_name is not null   -- only decks with a name are worth an MV lookup
+      and d.deck_name is not null
       and d.mv_status <> 'exhausted'
       and (d.mv_lookup_at is null or d.mv_lookup_at < now() - interval '1 day')
     order by d.mv_lookup_at nulls first
@@ -283,10 +449,11 @@ begin
     select s.deck_code, s.deck_uuid
     from public.scans s
     where s.deck_ref = st.id
-    order by s.created_at desc
+    order by s.is_clone asc, s.created_at desc
     limit 1
   ) sc on true;
 end $$;
+
 
 revoke execute on function public.decks_pending_resolution(integer) from anon, authenticated;
 grant execute on function public.decks_pending_resolution(integer) to service_role;
@@ -307,13 +474,12 @@ end $$;
 revoke execute on function public.delete_account from anon, public;
 grant execute on function public.delete_account to authenticated;
 
--- Current location per deck (most recent scan wins); security_invoker so RLS
--- applies. Canonical name/mv_id/set_id come from `decks` (name falls back to the
--- scan's own value during/after transition).
+-- Current location per deck copy (most recent scan wins); security_invoker so
+-- RLS applies. Canonical name/mv_id/set_id/mv_status come from `decks` (name
+-- falls back to the scan's own value, e.g. a manual name). One row per scanned
+-- identifier: a clone is its own row, flagged is_clone.
 create or replace view public.current_deck_locations
 with (security_invoker = true) as
--- deck_ref is LAST so that applying migrations (which use CREATE OR REPLACE VIEW
--- and cannot reorder existing columns) converges to this exact shape.
 select distinct on (s.user_id, s.deck_id)
   s.id as scan_id, s.user_id, s.deck_id,
   coalesce(d.deck_name, s.deck_name) as deck_name,
@@ -321,8 +487,12 @@ select distinct on (s.user_id, s.deck_id)
   d.mv_id,
   d.set_id,
   l.name as label, s.position, s.scanned_at, s.created_at,
-  s.deck_ref
+  s.deck_ref,
+  s.is_clone,
+  s.name_source,
+  d.mv_status
 from public.scans s
 join public.labels l on l.id = s.label_id
 left join public.decks d on d.id = s.deck_ref
 order by s.user_id, s.deck_id, s.created_at desc;
+

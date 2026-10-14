@@ -15,11 +15,9 @@ begin;
 -- deck_ref is now mandatory
 alter table public.scans alter column deck_ref set not null;
 
--- Drop the denormalized MV columns now owned by `decks`
-alter table public.scans drop column if exists mv_id;
-alter table public.scans drop column if exists set_id;
-
--- View: mv_id/set_id now come solely from `decks`; deck_name keeps its fallback
+-- View FIRST: mv_id/set_id now come solely from `decks` (deck_name keeps its
+-- fallback). The view must stop referencing scans.mv_id/set_id before those
+-- columns can be dropped below, or Postgres refuses the drop (2BP01).
 create or replace view public.current_deck_locations
 with (security_invoker = true) as
 -- deck_ref stays LAST to match the column order established in 0001 (CREATE OR
@@ -36,5 +34,9 @@ from public.scans s
 join public.labels l on l.id = s.label_id
 left join public.decks d on d.id = s.deck_ref
 order by s.user_id, s.deck_id, s.created_at desc;
+
+-- Drop the denormalized MV columns now owned by `decks`
+alter table public.scans drop column if exists mv_id;
+alter table public.scans drop column if exists set_id;
 
 commit;

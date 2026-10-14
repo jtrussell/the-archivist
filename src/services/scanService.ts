@@ -9,7 +9,12 @@ export interface RecordedScan {
   scanId: string
   labelId: string
   position: number
+  /** Name the database recorded for the scan (may come from a linked deck or an earlier manual entry) */
+  deckName: string | null
 }
+
+export type DeckNameSource = 'api' | 'manual'
+export type DeckMvStatus = 'pending' | 'resolved' | 'exhausted' | 'unverified' | 'invalid'
 
 export interface DeckLocation {
   scan_id: string
@@ -24,7 +29,18 @@ export interface DeckLocation {
   label: string
   position: number
   scanned_at: string
+  /** Ghost Galaxy deck clone (its own physical copy, C- prefixed code) */
+  is_clone: boolean
+  /** Where this copy's scan-level name came from (null for legacy rows = API) */
+  name_source: DeckNameSource | null
+  /** Lifecycle of the shared deck row's Master Vault id */
+  mv_status: DeckMvStatus | null
 }
+
+// Kept as ONE string literal: supabase-js infers the row type from the literal,
+// and a concatenated string degrades it to an error type.
+const LOCATION_COLUMNS =
+  'scan_id, deck_id, deck_name, deck_code, deck_uuid, deck_ref, mv_id, set_id, label, position, scanned_at, is_clone, name_source, mv_status'
 
 /**
  * Record a scan via the record_scan RPC; the database assigns the
@@ -37,6 +53,7 @@ export async function recordScanToDb(item: {
   deckCode: string | null
   deckUuid: string | null
   scannedAt: string
+  isClone: boolean
 }): Promise<RecordedScan> {
   const { data, error } = await supabase.rpc('record_scan', {
     p_label: item.label,
@@ -45,6 +62,7 @@ export async function recordScanToDb(item: {
     p_deck_code: item.deckCode,
     p_deck_uuid: item.deckUuid,
     p_scanned_at: item.scannedAt,
+    p_is_clone: item.isClone,
   })
 
   if (error) throw new Error(`Failed to record scan: ${error.message}`)
@@ -56,6 +74,7 @@ export async function recordScanToDb(item: {
     scanId: row.scan_id,
     labelId: row.label_id,
     position: row.position,
+    deckName: row.deck_name ?? null,
   }
 }
 
@@ -88,15 +107,32 @@ export async function getMaxPosition(label: string): Promise<number> {
 }
 
 /**
- * Count scans whose deck name lookup failed (candidates for backfill)
+ * Count scans whose deck name lookup failed (candidates for backfill).
+ * Clones are excluded: the API can never name them, so they are linked by hand.
  */
 export async function countNamelessScans(): Promise<number> {
   const { count, error } = await supabase
     .from('scans')
     .select('id', { count: 'exact', head: true })
     .is('deck_name', null)
+    .eq('is_clone', false)
 
   if (error) throw new Error(`Failed to count nameless scans: ${error.message}`)
+  return count ?? 0
+}
+
+/**
+ * Count the current user's clone copies that have not been linked to a deck
+ * yet (they show up under "Missing names only" in Search).
+ */
+export async function countUnlinkedClones(): Promise<number> {
+  const { count, error } = await supabase
+    .from('current_deck_locations')
+    .select('scan_id', { count: 'exact', head: true })
+    .eq('is_clone', true)
+    .is('deck_name', null)
+
+  if (error) throw new Error(`Failed to count unlinked clones: ${error.message}`)
   return count ?? 0
 }
 
@@ -135,6 +171,7 @@ export async function backfillDeckNames(
     .from('scans')
     .select('deck_id, deck_code, deck_uuid')
     .is('deck_name', null)
+    .eq('is_clone', false) // clone codes are unresolvable; don't burn requests on them
 
   if (error) throw new Error(`Failed to load nameless scans: ${error.message}`)
 
@@ -156,7 +193,7 @@ export async function backfillDeckNames(
     if (name !== null) {
       const { count, error: updateError } = await supabase
         .from('scans')
-        .update({ deck_name: name }, { count: 'exact' })
+        .update({ deck_name: name, name_source: 'api' }, { count: 'exact' })
         .eq('deck_id', deckId)
         .is('deck_name', null)
 
@@ -179,6 +216,10 @@ export async function backfillDeckNames(
   return { updated, remaining }
 }
 
+/**
+ * Retry the API name lookup for one copy. An API name replaces a missing name,
+ * a placeholder name, or a manually entered one (API truth wins).
+ */
 export async function backfillSingleDeckName(deck: {
   deck_id: string
   deck_code: string | null
@@ -189,12 +230,56 @@ export async function backfillSingleDeckName(deck: {
 
   const { error } = await supabase
     .from('scans')
-    .update({ deck_name: name })
+    .update({ deck_name: name, name_source: 'api' })
     .eq('deck_id', deck.deck_id)
-    .or(`deck_name.is.null,deck_name.eq.${deck.deck_id}`)
+    .or(`deck_name.is.null,deck_name.eq.${deck.deck_id},name_source.eq.manual`)
 
   if (error) throw new Error(`Failed to update deck name: ${error.message}`)
   return name
+}
+
+/**
+ * Manual escape hatch, name-only variant: record a user-entered name on the
+ * caller's own scans of one copy. Never touches the shared `decks` row (RLS
+ * limits the update to the caller's rows), and a verified Master Vault name
+ * takes precedence over it in the view.
+ */
+export async function setDeckName(
+  deckId: string,
+  name: string,
+  source: DeckNameSource = 'manual'
+): Promise<void> {
+  const trimmed = name.trim()
+  if (trimmed === '') throw new Error('Name cannot be empty')
+
+  const { error } = await supabase
+    .from('scans')
+    .update({ deck_name: trimmed, name_source: source })
+    .eq('deck_id', deckId)
+
+  if (error) throw new Error(`Failed to save deck name: ${error.message}`)
+}
+
+export type AttachTarget =
+  | { mvId: string; setId: number | null; name: string | null }
+  | { targetDeckRef: string }
+
+/**
+ * Manual escape hatch: attach all of the caller's scans of one copy (a clone
+ * code, or an original the API couldn't name) to a deck — a Master Vault id
+ * hydrated from the API, or a deck already in the caller's collection. Returns
+ * the deck row the copy now belongs to.
+ */
+export async function attachScansToDeck(deckId: string, target: AttachTarget): Promise<string> {
+  const params =
+    'mvId' in target
+      ? { p_deck_id: deckId, p_mv_id: target.mvId, p_set_id: target.setId, p_name: target.name }
+      : { p_deck_id: deckId, p_target_deck_ref: target.targetDeckRef }
+
+  const { data, error } = await supabase.rpc('attach_scans_to_deck', params)
+  if (error) throw new Error(`Failed to link deck: ${error.message}`)
+  if (typeof data !== 'string') throw new Error('attach_scans_to_deck returned no result')
+  return data
 }
 
 /**
@@ -272,7 +357,7 @@ export async function exportScansCsv(): Promise<string> {
   const { data, error } = await supabase
     .from('scans')
     .select(
-      'scanned_at, deck_id, deck_code, deck_uuid, deck_name, position, labels(name), decks:deck_ref(mv_id, set_id)'
+      'scanned_at, deck_id, deck_code, deck_uuid, deck_name, name_source, is_clone, position, labels(name), decks:deck_ref(mv_id, set_id)'
     )
     .order('scanned_at', { ascending: true })
 
@@ -284,7 +369,8 @@ export async function exportScansCsv(): Promise<string> {
     return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str
   }
 
-  const header = 'scanned_at,label,position,deck_name,deck_id,deck_code,deck_uuid,mv_id,set_id'
+  const header =
+    'scanned_at,label,position,deck_name,deck_id,deck_code,deck_uuid,mv_id,set_id,is_clone,name_source'
   const rows = (data ?? []).map((row) => {
     // labels(name) / decks(...) are many-to-one joins: supabase-js types them loosely
     const label = (row.labels as unknown as { name: string } | null)?.name ?? ''
@@ -299,6 +385,8 @@ export async function exportScansCsv(): Promise<string> {
       row.deck_uuid,
       deck?.mv_id ?? null,
       deck?.set_id ?? null,
+      row.is_clone ? 'true' : 'false',
+      row.name_source,
     ].map(escape).join(',')
   })
 
@@ -335,10 +423,7 @@ export async function searchDecks(
 
   let builder = supabase
     .from('current_deck_locations')
-    .select(
-      'scan_id, deck_id, deck_name, deck_code, deck_uuid, deck_ref, mv_id, set_id, label, position, scanned_at',
-      { count: 'exact' }
-    )
+    .select(LOCATION_COLUMNS, { count: 'exact' })
 
   if (missingNamesOnly) {
     builder = builder.is('deck_name', null)
@@ -378,14 +463,26 @@ export async function getDeckByScanId(scanId: string): Promise<DeckLocation | nu
 
   const { data: deck, error: deckError } = await supabase
     .from('current_deck_locations')
-    .select(
-      'scan_id, deck_id, deck_name, deck_code, deck_uuid, deck_ref, mv_id, set_id, label, position, scanned_at'
-    )
+    .select(LOCATION_COLUMNS)
     .eq('deck_id', scan.deck_id)
     .maybeSingle()
 
   if (deckError) throw new Error(`Failed to load deck: ${deckError.message}`)
   return deck
+}
+
+/**
+ * Every physical copy (one view row per scanned identifier) the current user
+ * has of one deck. RLS scopes this to the caller's own scans.
+ */
+export async function getDeckCopies(deckRef: string): Promise<DeckLocation[]> {
+  const { data, error } = await supabase
+    .from('current_deck_locations')
+    .select(LOCATION_COLUMNS)
+    .eq('deck_ref', deckRef)
+
+  if (error) throw new Error(`Failed to load deck copies: ${error.message}`)
+  return data ?? []
 }
 
 export interface DeckScanRecord {
@@ -396,13 +493,15 @@ export interface DeckScanRecord {
 }
 
 /**
- * Full scan history for one deck, newest first
+ * Full scan history for one physical copy (all of its scanned identifiers),
+ * newest first
  */
-export async function getDeckHistory(deckId: string): Promise<DeckScanRecord[]> {
+export async function getDeckHistory(deckIds: string | string[]): Promise<DeckScanRecord[]> {
+  const ids = Array.isArray(deckIds) ? deckIds : [deckIds]
   const { data, error } = await supabase
     .from('scans')
     .select('id, position, scanned_at, labels(name)')
-    .eq('deck_id', deckId)
+    .in('deck_id', ids)
     .order('scanned_at', { ascending: false })
 
   if (error) throw new Error(`Failed to load scan history: ${error.message}`)

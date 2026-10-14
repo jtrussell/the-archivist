@@ -1,20 +1,27 @@
-// Background job: resolve Master Vault ids for unresolved decks.
+// Background job: resolve and verify Master Vault ids for the shared `decks` table.
 //
 // Runs on a schedule (Supabase Cron -> this function) with the service-role key,
 // so it works whether or not any client is open — the "scan a batch, close the
-// app, download a hydrated CSV next morning" case. It reads each deck's private
-// scan code/uuid (allowed as service role), resolves name + mv_id against the
-// KeyForge Master Vault API, and writes only non-sensitive facts back via the
-// link_deck_master_vault_admin RPC (which also merges cross-format / cross-user
-// duplicates onto one canonical row).
+// app, download a hydrated CSV next morning" case. Two phases per run:
 //
-// Timing / safety design (see also the work-queue function decks_pending_resolution):
+//   1. VERIFY: decks whose mv_id was asserted by a client ('unverified' — the
+//      manual escape hatch, or the client's name-search fast path) are fetched
+//      from the Master Vault BY ID and overwritten with the API's name/set_id
+//      ('resolved'), or flagged 'invalid' when the id doesn't exist. This is
+//      what makes client writes to the shared table self-healing: a wrong or
+//      malicious assertion can never stick.
+//   2. RESOLVE: nameless-id decks are searched by name (exact match) and linked
+//      via link_deck_master_vault_admin (which also merges cross-user
+//      duplicates onto one canonical row).
+//
+// Timing / safety design (see also the work-queue functions
+// decks_pending_verification / decks_pending_resolution):
 //   * Returns 202 immediately and does the work in EdgeRuntime.waitUntil, so the
 //     job survives the caller (pg_net) disconnecting and can use the full
 //     wall-clock budget. Free-tier wall limit is 150s; we stop at TIME_BUDGET_MS.
 //   * Drains in a loop of small CLAIMED chunks rather than one big batch, so a
 //     run never approaches the wall limit and a mid-flight stop strands at most
-//     one chunk (which self-heals after the 24h backoff).
+//     one chunk (which self-heals after the backoff).
 //   * Claiming (SKIP LOCKED) means stacked/overlapping invocations get disjoint
 //     rows — never duplicate API calls.
 //
@@ -28,34 +35,26 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 
 const API_BASE = 'https://www.keyforgegame.com/api'
-// KeyForge/Cloudflare serves this egress slowly (tarpit-style latency: often
-// several seconds, occasionally >15s). A generous timeout lets the slow-but-fine
-// requests complete; the rare true hang aborts and is retried on a later run.
+
+// KeyForge/Cloudflare serves this egress slowly (often several seconds,
+// occasionally >15s). A generous timeout lets the slow-but-fine requests
+// complete; the rare true hang aborts and is retried on a later run.
 const EXPLORE_SEARCH_TIMEOUT_MS = 15000
-const THROTTLE_MS = 150
-const CHUNK_SIZE = 25          // decks claimed+processed per loop iteration
-const TIME_BUDGET_MS = 120_000 // stop well under the 150s free-tier wall limit
+const CHUNK_SIZE = 30           // decks claimed per loop iteration
+// KeyForge degrades under concurrent load (it appears to throttle bursts), so
+// serial is the best-observed setting — parallelism made throughput WORSE.
+// Left tunable via the MV_CONCURRENCY secret in case that ever changes.
+const CONCURRENCY = Number(Deno.env.get('MV_CONCURRENCY')) || 1
+const TIME_BUDGET_MS = 120_000  // stop well under the 150s free-tier wall limit
 
 // KeyForge is behind Cloudflare; a bare server-side fetch (no browser headers)
 // tends to get a 403/challenge. Present browser-like headers so the API responds
 // the same way it does for the client.
-const REQUEST_HEADERS = {
+const REQUEST_HEADERS: Record<string, string> = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36',
   Accept: 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
-}
-
-const randByte = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1))
-
-// Fresh headers per request, with a randomized private-range X-Forwarded-For.
-// Note: Cloudflare uses the real connection IP, so this only matters if the
-// origin app itself keys off XFF — treat it as best-effort, not a real bypass.
-function requestHeaders(): HeadersInit {
-  return {
-    ...REQUEST_HEADERS,
-    'X-Forwarded-For': `192.168.${randByte(0, 255)}.${randByte(1, 254)}`,
-  }
 }
 
 interface PendingDeck {
@@ -65,9 +64,12 @@ interface PendingDeck {
   deck_uuid: string | null
 }
 
-type SupabaseClient = ReturnType<typeof createClient>
+interface UnverifiedDeck {
+  id: string
+  mv_id: string
+}
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+type SupabaseClient = ReturnType<typeof createClient>
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -89,7 +91,7 @@ async function fetchMasterVaultInfo(deckName: string): Promise<SearchResult> {
   const params = new URLSearchParams({ page: '1', page_size: '10', search: deckName })
   try {
     const res = await fetch(`${API_BASE}/decks/explore/?${params}`, {
-      headers: requestHeaders(),
+      headers: REQUEST_HEADERS,
       signal: AbortSignal.timeout(EXPLORE_SEARCH_TIMEOUT_MS),
     })
     const contentType = res.headers.get('content-type')
@@ -144,6 +146,39 @@ async function fetchMasterVaultInfo(deckName: string): Promise<SearchResult> {
   }
 }
 
+type ByIdResult =
+  | { kind: 'found'; name: string; setId: number | null }
+  | { kind: 'missing' }          // definitive 404: the id does not exist
+  | { kind: 'error'; debug: string } // transient (timeout, 5xx, challenge page)
+
+/** Fetch a deck by Master Vault id. Only a clean 404 counts as "missing". */
+async function fetchMasterVaultById(mvId: string): Promise<ByIdResult> {
+  try {
+    const res = await fetch(`${API_BASE}/decks/${mvId}/`, {
+      headers: REQUEST_HEADERS,
+      signal: AbortSignal.timeout(EXPLORE_SEARCH_TIMEOUT_MS),
+    })
+    const text = await res.text()
+    if (res.status === 404) return { kind: 'missing' }
+    if (!res.ok) return { kind: 'error', debug: `status=${res.status}` }
+
+    let body: { data?: { name?: unknown; expansion?: unknown } } | null = null
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return { kind: 'error', debug: `non-json body="${text.slice(0, 120)}"` }
+    }
+    const name = body?.data?.name
+    if (typeof name !== 'string' || name.length === 0) {
+      return { kind: 'error', debug: 'no name in body' }
+    }
+    const expansion = body?.data?.expansion
+    return { kind: 'found', name, setId: typeof expansion === 'number' ? expansion : null }
+  } catch (e) {
+    return { kind: 'error', debug: String(e).slice(0, 120) }
+  }
+}
+
 type Outcome = 'resolved' | 'no-name' | 'search-http-error' | 'no-match' | 'link-error'
 
 /** Resolve one deck and persist the outcome (success or recorded miss). */
@@ -178,50 +213,109 @@ async function resolveDeck(
   return { outcome: 'no-match', debug }
 }
 
-/** Drain the queue in small claimed chunks until the time budget is spent. */
-async function drainQueue(supabase: SupabaseClient): Promise<void> {
-  const startedAt = Date.now()
+type VerifyOutcome = 'verified' | 'invalid' | 'verify-error' | 'verdict-error'
+
+/** Verify one client-asserted mv_id by fetching it and persisting the verdict. */
+async function verifyDeck(
+  supabase: SupabaseClient,
+  deck: UnverifiedDeck
+): Promise<{ outcome: VerifyOutcome; debug: string | null }> {
+  const result = await fetchMasterVaultById(deck.mv_id)
+  // Transient failures record nothing; the claim stamp defers a retry by 1h.
+  if (result.kind === 'error') return { outcome: 'verify-error', debug: result.debug }
+
+  const { error } = await supabase.rpc('verify_deck_admin', {
+    p_deck_ref: deck.id,
+    p_valid: result.kind === 'found',
+    p_name: result.kind === 'found' ? result.name : null,
+    p_set_id: result.kind === 'found' ? result.setId : null,
+  })
+  if (error) return { outcome: 'verdict-error', debug: error.message }
+  return { outcome: result.kind === 'found' ? 'verified' : 'invalid', debug: null }
+}
+
+/**
+ * Generic claim-and-process loop with bounded concurrency and a shared
+ * deadline. `claim` pulls the next chunk (empty = drained); `handle` processes
+ * one row and returns an outcome label for the tally.
+ */
+async function drain<T extends { id: string }>(
+  label: string,
+  timeLeft: () => number,
+  claim: () => Promise<T[]>,
+  handle: (row: T) => Promise<{ outcome: string; debug: string | null }>,
+  describe: (row: T) => string
+): Promise<void> {
   let processed = 0
-  const tally: Record<Outcome, number> = {
-    resolved: 0,
-    'no-name': 0,
-    'search-http-error': 0,
-    'no-match': 0,
-    'link-error': 0,
-  }
+  const tally: Record<string, number> = {}
   let sample: string | null = null
 
-  while (Date.now() - startedAt < TIME_BUDGET_MS) {
-    const { data, error } = await supabase.rpc('decks_pending_resolution', {
-      p_limit: CHUNK_SIZE,
-    })
-    if (error) {
-      console.error('claim failed:', error.message)
-      break
-    }
-    const chunk = (data ?? []) as PendingDeck[]
-    if (chunk.length === 0) break // queue drained
-
-    for (const deck of chunk) {
-      if (Date.now() - startedAt >= TIME_BUDGET_MS) break
-      const { outcome, debug } = await resolveDeck(supabase, deck)
-      tally[outcome]++
-      processed++
-      // Keep one example of a non-success for the logs
-      if (sample === null && outcome !== 'resolved') {
-        sample =
-          `${outcome} deck=${deck.id} name=${JSON.stringify(deck.deck_name)}` +
-          (debug ? ` | ${debug}` : '')
-      }
-      await sleep(THROTTLE_MS)
+  // Tally + sample update. Runs on the single JS event loop, so the shared
+  // counters are safe to mutate from the concurrent workers below.
+  const run = async (row: T): Promise<void> => {
+    if (timeLeft() <= 0) return
+    const { outcome, debug } = await handle(row)
+    tally[outcome] = (tally[outcome] ?? 0) + 1
+    processed++
+    if (sample === null && !outcome.startsWith('resolved') && !outcome.startsWith('verified')) {
+      sample = `${outcome} ${describe(row)}` + (debug ? ` | ${debug}` : '')
     }
   }
 
-  console.log(
-    `backfill-mv-ids: processed=${processed} resolved=${tally.resolved} ` +
-      `no-name=${tally['no-name']} search-http-error=${tally['search-http-error']} ` +
-      `no-match=${tally['no-match']} link-error=${tally['link-error']}` +
-      (sample ? ` | sample: ${sample}` : '')
+  while (timeLeft() > 0) {
+    let chunk: T[]
+    try {
+      chunk = await claim()
+    } catch (e) {
+      console.error(`${label}: claim failed:`, e instanceof Error ? e.message : String(e))
+      break
+    }
+    if (chunk.length === 0) break // queue drained
+
+    // Fan the chunk out across CONCURRENCY workers that pull from a shared cursor.
+    let next = 0
+    const runners = Array.from(
+      { length: Math.min(CONCURRENCY, chunk.length) },
+      async () => {
+        while (next < chunk.length && timeLeft() > 0) {
+          await run(chunk[next++])
+        }
+      }
+    )
+    await Promise.all(runners)
+  }
+
+  const counts = Object.entries(tally)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' ')
+  console.log(`${label}: processed=${processed} ${counts}` + (sample ? ` | sample: ${sample}` : ''))
+}
+
+async function claimRpc<T>(supabase: SupabaseClient, fn: string): Promise<T[]> {
+  const { data, error } = await supabase.rpc(fn, { p_limit: CHUNK_SIZE })
+  if (error) throw new Error(error.message)
+  return (data ?? []) as T[]
+}
+
+/** Both phases, sharing one time budget: verification first (cheap, by id). */
+async function runJob(supabase: SupabaseClient): Promise<void> {
+  const startedAt = Date.now()
+  const timeLeft = () => TIME_BUDGET_MS - (Date.now() - startedAt)
+
+  await drain<UnverifiedDeck>(
+    'verify-mv-ids',
+    timeLeft,
+    () => claimRpc<UnverifiedDeck>(supabase, 'decks_pending_verification'),
+    (deck) => verifyDeck(supabase, deck),
+    (deck) => `deck=${deck.id} mv_id=${deck.mv_id}`
+  )
+
+  await drain<PendingDeck>(
+    'backfill-mv-ids',
+    timeLeft,
+    () => claimRpc<PendingDeck>(supabase, 'decks_pending_resolution'),
+    (deck) => resolveDeck(supabase, deck),
+    (deck) => `deck=${deck.id} name=${JSON.stringify(deck.deck_name)}`
   )
 }
 
@@ -242,6 +336,6 @@ Deno.serve((req: Request) => {
 
   // Do the work in the background so it survives the caller disconnecting, and
   // return immediately so pg_net's request completes right away.
-  EdgeRuntime.waitUntil(drainQueue(supabase))
+  EdgeRuntime.waitUntil(runJob(supabase))
   return json({ status: 'started' }, 202)
 })

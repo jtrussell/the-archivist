@@ -15,6 +15,8 @@ export interface ScanQueueItem {
   deckCode: string | null
   deckUuid: string | null
   deckName: string | null
+  /** Ghost Galaxy deck clone (C- code). Absent on items queued by older builds = false. */
+  isClone?: boolean
   synced: boolean
 }
 
