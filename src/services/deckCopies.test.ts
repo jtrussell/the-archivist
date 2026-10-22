@@ -17,6 +17,8 @@ const row = (overrides: Partial<DeckLocation>): DeckLocation => ({
   is_clone: false,
   name_source: 'api',
   mv_status: 'pending',
+  removed_at: null,
+  removal_note: null,
   ...overrides,
 })
 

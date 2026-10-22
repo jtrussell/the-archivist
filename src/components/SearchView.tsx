@@ -20,6 +20,7 @@ export function SearchView() {
   const [missingNamesOnly, setMissingNamesOnly] = useState(
     () => searchParams.get('missing') === '1'
   )
+  const [includeRemoved, setIncludeRemoved] = useState(() => searchParams.get('removed') === '1')
   const [decks, setDecks] = useState<DeckLocation[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -35,10 +36,11 @@ export function SearchView() {
       if (query.trim()) next.set('q', query.trim())
       if (page > 0) next.set('page', String(page))
       if (missingNamesOnly) next.set('missing', '1')
+      if (includeRemoved) next.set('removed', '1')
       setSearchParams(next, { replace: true })
 
       try {
-        const result = await searchDecks(query, page, { missingNamesOnly })
+        const result = await searchDecks(query, page, { missingNamesOnly, includeRemoved })
         setDecks(result.decks)
         setTotal(result.total)
         setError(null)
@@ -52,7 +54,7 @@ export function SearchView() {
     }, query.trim() ? 300 : 0)
 
     return () => clearTimeout(timeout)
-  }, [query, page, missingNamesOnly])
+  }, [query, page, missingNamesOnly, includeRemoved])
 
   const totalPages = Math.max(1, Math.ceil(total / SEARCH_PAGE_SIZE))
 
@@ -73,23 +75,36 @@ export function SearchView() {
             placeholder={missingNamesOnly ? 'Search by scan ID or clone code...' : 'Search by deck name...'}
             className="text-lg"
           />
-          <div className="mt-3 flex items-center justify-between gap-4">
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-4">
             <p className="text-sm text-muted-foreground">
               {loading
                 ? 'Loading...'
                 : `${total} deck${total !== 1 ? 's' : ''}${missingNamesOnly ? ' missing names' : query.trim() ? ' match' : ' in your collection'}`}
             </p>
-            <Button
-              variant={missingNamesOnly ? 'secondary' : 'outline'}
-              size="sm"
-              aria-pressed={missingNamesOnly}
-              onClick={() => {
-                setMissingNamesOnly((current) => !current)
-                setPage(0)
-              }}
-            >
-              Missing names only
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant={includeRemoved ? 'secondary' : 'outline'}
+                size="sm"
+                aria-pressed={includeRemoved}
+                onClick={() => {
+                  setIncludeRemoved((current) => !current)
+                  setPage(0)
+                }}
+              >
+                Include removed
+              </Button>
+              <Button
+                variant={missingNamesOnly ? 'secondary' : 'outline'}
+                size="sm"
+                aria-pressed={missingNamesOnly}
+                onClick={() => {
+                  setMissingNamesOnly((current) => !current)
+                  setPage(0)
+                }}
+              >
+                Missing names only
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -129,6 +144,11 @@ export function SearchView() {
                       {deck.is_clone && (
                         <span className="ml-2 align-middle text-xs bg-purple-900 text-purple-200 px-2 py-0.5 rounded-full">
                           Clone
+                        </span>
+                      )}
+                      {deck.removed_at !== null && (
+                        <span className="ml-2 align-middle text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded-full">
+                          Removed
                         </span>
                       )}
                     </p>

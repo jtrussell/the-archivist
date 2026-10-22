@@ -4,6 +4,7 @@ import { Button } from './ui/button'
 import { Card, CardContent } from './ui/card'
 import { DeckNoteCard } from './DeckNoteCard'
 import { FixDeckDetailsPanel } from './FixDeckDetailsPanel'
+import { DeckArchiveActions, RemovedFromArchivesNotice } from './DeckArchiveActions'
 import { groupDeckCopies, DeckCopy } from '../services/deckCopies'
 import {
   getDeckByScanId,
@@ -133,6 +134,7 @@ function DeckDetail({
   onBack: () => void
   onChanged: () => void
 }) {
+  const navigate = useNavigate()
   const copies = groupDeckCopies(rows)
   const arrivedRow = rows.find((row) => row.deck_id === arrivedDeckId) ?? rows[0]
   const deckRef = arrivedRow.deck_ref ?? ''
@@ -190,6 +192,17 @@ function DeckDetail({
       cancelled = true
     }
   }, [deckRef, deckName, mvInfo, mvStatus])
+
+  const handleCopyDeleted = (deletedCopy: DeckCopy) => {
+    const remainingCopies = copies.filter((copy) => copy.key !== deletedCopy.key)
+    if (remainingCopies.length === 0) {
+      navigate('/search', { replace: true })
+    } else if (deletedCopy.deckIds.includes(arrivedDeckId)) {
+      navigate(`/deck/${remainingCopies[0].current.scan_id}`, { replace: true })
+    } else {
+      onChanged()
+    }
+  }
 
   const copyDeckName = async () => {
     try {
@@ -282,6 +295,8 @@ function DeckDetail({
             </div>
           )}
 
+          {soleCopy && <RemovedFromArchivesNotice copy={soleCopy} onChanged={onChanged} />}
+
           {soleCopy && soleCopy.kind === 'original' && deckName === null && fixScope === null && (
             <RetryNameLookup row={soleCopy.current} onChanged={onChanged} />
           )}
@@ -323,6 +338,12 @@ function DeckDetail({
             <h2 className="text-sm font-medium mb-3">Scan History</h2>
             <ScanHistoryList deckIds={soleCopy.deckIds} />
           </div>
+          <DeckArchiveActions
+            copy={soleCopy}
+            subject={soleCopy.kind === 'clone' ? 'this clone' : 'this deck'}
+            onChanged={onChanged}
+            onDeleted={() => handleCopyDeleted(soleCopy)}
+          />
         </>
       )}
 
@@ -345,6 +366,7 @@ function DeckDetail({
                     : null
                 }
                 onChanged={onChanged}
+                onDeleted={() => handleCopyDeleted(copy)}
               />
             ))}
           </div>
@@ -360,12 +382,14 @@ function CopyCard({
   highlighted,
   onRelink,
   onChanged,
+  onDeleted,
 }: {
   copy: DeckCopy
   highlighted: boolean
   /** null = re-linking not offered (verified original; clones can always re-link) */
   onRelink: (() => void) | null
   onChanged: () => void
+  onDeleted: () => void
 }) {
   const [showHistory, setShowHistory] = useState(false)
   const row = copy.current
@@ -392,6 +416,7 @@ function CopyCard({
             <p className="text-sm text-muted-foreground">
               Scanned {new Date(row.scanned_at).toLocaleString()}
             </p>
+            <RemovedFromArchivesNotice copy={copy} onChanged={onChanged} />
           </div>
           <div className="flex gap-2 shrink-0">
             <Button variant="outline" size="sm" onClick={() => setShowHistory((current) => !current)}>
@@ -417,6 +442,13 @@ function CopyCard({
             <ScanHistoryList deckIds={copy.deckIds} compact />
           </div>
         )}
+
+        <DeckArchiveActions
+          copy={copy}
+          subject={copy.kind === 'clone' ? 'this clone' : 'this copy'}
+          onChanged={onChanged}
+          onDeleted={onDeleted}
+        />
       </CardContent>
     </Card>
   )

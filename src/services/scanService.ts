@@ -35,12 +35,14 @@ export interface DeckLocation {
   name_source: DeckNameSource | null
   /** Lifecycle of the shared deck row's Master Vault id */
   mv_status: DeckMvStatus | null
+  removed_at: string | null
+  removal_note: string | null
 }
 
 // Kept as ONE string literal: supabase-js infers the row type from the literal,
 // and a concatenated string degrades it to an error type.
 const LOCATION_COLUMNS =
-  'scan_id, deck_id, deck_name, deck_code, deck_uuid, deck_ref, mv_id, set_id, label, position, scanned_at, is_clone, name_source, mv_status'
+  'scan_id, deck_id, deck_name, deck_code, deck_uuid, deck_ref, mv_id, set_id, label, position, scanned_at, is_clone, name_source, mv_status, removed_at, removal_note'
 
 /**
  * Record a scan via the record_scan RPC; the database assigns the
@@ -402,6 +404,31 @@ export async function deleteAccount(): Promise<void> {
   if (error) throw new Error(`Account deletion failed: ${error.message}`)
 }
 
+export async function removeDeckCopyFromArchives(deckIds: string[], note: string): Promise<void> {
+  const trimmedNote = note.trim()
+  const removedAt = new Date().toISOString()
+  const { error } = await supabase.from('deck_removals').upsert(
+    deckIds.map((deckId) => ({
+      deck_id: deckId,
+      note: trimmedNote === '' ? null : trimmedNote,
+      removed_at: removedAt,
+    })),
+    { onConflict: 'user_id,deck_id' }
+  )
+
+  if (error) throw new Error(`Failed to remove deck: ${error.message}`)
+}
+
+export async function restoreDeckCopyToArchives(deckIds: string[]): Promise<void> {
+  const { error } = await supabase.from('deck_removals').delete().in('deck_id', deckIds)
+  if (error) throw new Error(`Failed to restore deck: ${error.message}`)
+}
+
+export async function deleteDeckCopy(deckIds: string[]): Promise<void> {
+  const { error } = await supabase.rpc('delete_deck_copy', { p_deck_ids: deckIds })
+  if (error) throw new Error(`Failed to delete deck: ${error.message}`)
+}
+
 export const SEARCH_PAGE_SIZE = 12
 
 export interface DeckSearchPage {
@@ -417,9 +444,9 @@ export interface DeckSearchPage {
 export async function searchDecks(
   query: string,
   page: number,
-  options: { missingNamesOnly?: boolean; pageSize?: number } = {}
+  options: { missingNamesOnly?: boolean; includeRemoved?: boolean; pageSize?: number } = {}
 ): Promise<DeckSearchPage> {
-  const { missingNamesOnly = false, pageSize = SEARCH_PAGE_SIZE } = options
+  const { missingNamesOnly = false, includeRemoved = false, pageSize = SEARCH_PAGE_SIZE } = options
 
   let builder = supabase
     .from('current_deck_locations')
@@ -427,6 +454,10 @@ export async function searchDecks(
 
   if (missingNamesOnly) {
     builder = builder.is('deck_name', null)
+  }
+
+  if (!includeRemoved) {
+    builder = builder.is('removed_at', null)
   }
 
   const trimmed = query.trim()

@@ -68,10 +68,19 @@ create table public.deck_notes (
   unique (user_id, deck_id)
 );
 
+create table public.deck_removals (
+  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  deck_id    text not null,
+  note       text,
+  removed_at timestamptz not null default now(),
+  primary key (user_id, deck_id)
+);
+
 alter table public.labels enable row level security;
 alter table public.scans  enable row level security;
 alter table public.decks  enable row level security;
 alter table public.deck_notes enable row level security;
+alter table public.deck_removals enable row level security;
 
 create policy "own labels select" on public.labels for select using (user_id = auth.uid());
 create policy "own labels insert" on public.labels for insert with check (user_id = auth.uid());
@@ -89,6 +98,11 @@ create policy "own notes insert" on public.deck_notes for insert with check (use
 create policy "own notes update" on public.deck_notes for update
   using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "own notes delete" on public.deck_notes for delete using (user_id = auth.uid());
+create policy "own removals select" on public.deck_removals for select using (user_id = auth.uid());
+create policy "own removals insert" on public.deck_removals for insert with check (user_id = auth.uid());
+create policy "own removals update" on public.deck_removals for update
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "own removals delete" on public.deck_removals for delete using (user_id = auth.uid());
 
 -- Atomic scan recording: the label upsert row-locks the label, serializing
 -- max(position)+1 per (user, label); returns the assigned position (and the
@@ -175,6 +189,19 @@ begin
   values (v_uid, v_label_id, p_deck_id, p_deck_code, p_deck_uuid, v_name, v_source,
           v_deck_ref, v_pos, p_scanned_at, coalesce(p_is_clone, false))
   returning id into v_scan_id;
+
+  delete from deck_removals r
+  where r.user_id = v_uid
+    and (
+      r.deck_id = p_deck_id
+      or (
+        not coalesce(p_is_clone, false)
+        and r.deck_id in (
+          select s.deck_id from scans s
+          where s.user_id = v_uid and s.deck_ref = v_deck_ref and not s.is_clone
+        )
+      )
+    );
 
   return query select v_scan_id, v_label_id, v_pos, v_name;
 end $$;
@@ -474,6 +501,35 @@ end $$;
 revoke execute on function public.delete_account from anon, public;
 grant execute on function public.delete_account to authenticated;
 
+create or replace function public.delete_deck_copy(p_deck_ids text[])
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_uid       uuid := auth.uid();
+  v_deck_refs uuid[];
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select array_agg(distinct s.deck_ref) into v_deck_refs
+  from scans s
+  where s.user_id = v_uid and s.deck_id = any (p_deck_ids);
+
+  delete from scans s where s.user_id = v_uid and s.deck_id = any (p_deck_ids);
+  delete from deck_notes n where n.user_id = v_uid and n.deck_id = any (p_deck_ids);
+  delete from deck_removals r where r.user_id = v_uid and r.deck_id = any (p_deck_ids);
+
+  delete from decks d
+  where d.id = any (coalesce(v_deck_refs, '{}'))
+    and d.mv_id is null
+    and not exists (select 1 from scans s where s.deck_ref = d.id);
+end $$;
+
+revoke execute on function public.delete_deck_copy(text[]) from anon, public;
+grant execute on function public.delete_deck_copy(text[]) to authenticated;
+
 -- Current location per deck copy (most recent scan wins); security_invoker so
 -- RLS applies. Canonical name/mv_id/set_id/mv_status come from `decks` (name
 -- falls back to the scan's own value, e.g. a manual name). One row per scanned
@@ -490,9 +546,12 @@ select distinct on (s.user_id, s.deck_id)
   s.deck_ref,
   s.is_clone,
   s.name_source,
-  d.mv_status
+  d.mv_status,
+  r.removed_at,
+  r.note as removal_note
 from public.scans s
 join public.labels l on l.id = s.label_id
 left join public.decks d on d.id = s.deck_ref
+left join public.deck_removals r on r.user_id = s.user_id and r.deck_id = s.deck_id
 order by s.user_id, s.deck_id, s.created_at desc;
 
