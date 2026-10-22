@@ -164,12 +164,7 @@ export function DeckArchiveActions({
           Remove from archives
         </Button>
       )}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="text-destructive hover:text-destructive"
-        onClick={() => setPendingAction('delete')}
-      >
+      <Button variant="destructive" size="sm" onClick={() => setPendingAction('delete')}>
         Delete permanently
       </Button>
     </div>
